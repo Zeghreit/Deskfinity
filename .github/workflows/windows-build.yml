@@ -1,0 +1,65 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # attach the exe to a release on version tags
+
+jobs:
+  tests:
+    name: Tests (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Qt runtime libraries
+        run: sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - run: pip install PyQt6
+      - name: Unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests
+
+  windows:
+    name: Windows checks and exe
+    needs: tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install PyQt6 pyinstaller
+      - name: Windows API tests (real Windows platform)
+        env:
+          QT_QPA_PLATFORM: windows
+        run: python -m unittest discover -s tests -p "test_windows*.py" -v
+      - name: Build Deskfinity.exe
+        run: pyinstaller --noconfirm --onefile --windowed --name Deskfinity deskfinity.py
+      - name: Smoke-run the exe
+        shell: pwsh
+        run: |
+          $env:DESKFINITY_DATA = Join-Path $env:RUNNER_TEMP "dfdata"
+          $p = Start-Process -FilePath dist\Deskfinity.exe -PassThru
+          Start-Sleep -Seconds 10
+          $log = Join-Path $env:DESKFINITY_DATA "deskfinity.log"
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.HasExited) { throw "Deskfinity.exe exited early (code $($p.ExitCode))" }
+          if (-not (Select-String -Path $log -Pattern "Starting Deskfinity" -Quiet)) { throw "no start-up line in the log" }
+          Stop-Process -Id $p.Id
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Deskfinity-exe
+          path: dist/Deskfinity.exe
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Deskfinity.exe
