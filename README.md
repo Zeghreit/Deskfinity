@@ -145,6 +145,9 @@ Safety net:
 Log: `%APPDATA%\Deskfinity\deskfinity.log` — errors, plus every file the app
 moves (from where to where), so nothing gets lost without a trace.
 
+The interface speaks English or Russian, following the Windows language;
+tray → **Язык / Language** switches it.
+
 Autostart is toggled from the tray and writes to
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
@@ -320,6 +323,9 @@ pythonw deskfinity.py
 
 Журнал: `%APPDATA%\Deskfinity\deskfinity.log` — ошибки и каждый перенос файла
 (откуда и куда), чтобы ничего не терялось бесследно.
+
+Интерфейс на русском или английском — по языку Windows; переключается в
+трее: **Язык / Language**.
 
 Автозапуск включается из трея и пишет ключ в
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.

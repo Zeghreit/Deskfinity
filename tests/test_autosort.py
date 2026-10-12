@@ -171,7 +171,7 @@ class AutoSort(Base):
     def test_dialog_presets(self):
         dlg = df.RulesDialog("Docs", ["*.pdf"])
         self.addCleanup(dlg.close)
-        dlg.add(dict(df.RULE_PRESETS)["Документы"])
+        dlg.add(next(p for ru, en, p in df.RULE_PRESETS if en == "Documents"))
         pats = dlg.patterns()
         self.assertEqual(pats[0], "*.pdf")
         self.assertEqual(pats.count("*.pdf"), 1)

@@ -42,6 +42,24 @@ IS_WINDOWS = sys.platform.startswith("win")
 APP_NAME = "Deskfinity"
 PORTABLE_DIR = "DeskfinityData"
 
+LANG = "ru"   # UI language: "ru" or "en", see set_language()
+
+
+def system_language():
+    ru = QtCore.QLocale.Language.Russian
+    return "ru" if QtCore.QLocale.system().language() == ru else "en"
+
+
+def set_language(code):
+    """Use "ru" or "en"; anything else follows the Windows language."""
+    global LANG
+    LANG = code if code in ("ru", "en") else system_language()
+
+
+def tr(ru, en):
+    """The UI string for the current language."""
+    return en if LANG == "en" else ru
+
 
 def program_path():
     """The running program: the .exe of a frozen build, else this script."""
@@ -476,17 +494,19 @@ def elevated_move(pairs, parent=None):
 # --------------------------------------------------------------------------- #
 # A rule is a name pattern: "*" / "?" wildcards, case-insensitive. Plain
 # patterns match files; a trailing "/" matches folders instead ("*/").
-RULE_PRESETS = [
-    ("Документы", "*.pdf; *.doc; *.docx; *.odt; *.rtf; *.txt; *.md; "
-                  "*.xls; *.xlsx; *.ods; *.csv; *.ppt; *.pptx; *.odp"),
-    ("Картинки", "*.png; *.jpg; *.jpeg; *.gif; *.bmp; *.webp; *.svg; "
-                 "*.tif; *.tiff; *.heic; *.psd"),
-    ("Видео", "*.mp4; *.mkv; *.avi; *.mov; *.webm; *.wmv"),
-    ("Музыка", "*.mp3; *.wav; *.flac; *.ogg; *.m4a; *.aac"),
-    ("Архивы", "*.zip; *.rar; *.7z; *.tar; *.gz; *.bz2; *.xz"),
-    ("Установщики", "*.exe; *.msi; *.msix; *.appx"),
-    ("Ярлыки", "*.lnk; *.url"),
-    ("Папки", "*/"),
+RULE_PRESETS = [  # (ru, en, patterns)
+    ("Документы", "Documents",
+     "*.pdf; *.doc; *.docx; *.odt; *.rtf; *.txt; *.md; "
+     "*.xls; *.xlsx; *.ods; *.csv; *.ppt; *.pptx; *.odp"),
+    ("Картинки", "Images",
+     "*.png; *.jpg; *.jpeg; *.gif; *.bmp; *.webp; *.svg; "
+     "*.tif; *.tiff; *.heic; *.psd"),
+    ("Видео", "Video", "*.mp4; *.mkv; *.avi; *.mov; *.webm; *.wmv"),
+    ("Музыка", "Music", "*.mp3; *.wav; *.flac; *.ogg; *.m4a; *.aac"),
+    ("Архивы", "Archives", "*.zip; *.rar; *.7z; *.tar; *.gz; *.bz2; *.xz"),
+    ("Установщики", "Installers", "*.exe; *.msi; *.msix; *.appx"),
+    ("Ярлыки", "Shortcuts", "*.lnk; *.url"),
+    ("Папки", "Folders", "*/"),
 ]
 
 # never auto-sorted: half-downloaded files, Office lock files, shell files
@@ -631,7 +651,7 @@ class Box(QtWidgets.QWidget):
 
         d = data or {}
         self.uid = d.get("uid") or uuid.uuid4().hex[:12]
-        self.title = d.get("title", "Новая группа")
+        self.title = d.get("title", tr("Новая группа", "New group"))
         self.move_files = bool(d.get("move_files", True))
         self.items = list(d.get("items", []))
         c = d.get("color", [24, 26, 32])
@@ -755,12 +775,18 @@ class Box(QtWidgets.QWidget):
         if not pending:
             return {}
         names = "\n".join("• " + os.path.basename(s) for s, _ in pending[:12])
-        more = f"\n… и ещё {len(pending) - 12}" if len(pending) > 12 else ""
+        extra = len(pending) - 12
+        more = tr(f"\n… и ещё {extra}", f"\n… and {extra} more") if extra > 0 else ""
         ans = QtWidgets.QMessageBox.question(
             self, APP_NAME,
-            f"Не удалось перенести {len(pending)} элемент(ов) — они лежат в общей "
-            f"папке рабочего стола и требуют прав администратора:\n\n{names}{more}\n\n"
-            "Повторить с повышением прав?",
+            tr(
+                f"Не удалось перенести {len(pending)} элемент(ов) — они лежат в "
+                f"общей папке рабочего стола и требуют прав администратора:"
+                f"\n\n{names}{more}\n\nПовторить с повышением прав?",
+                f"{len(pending)} item(s) could not be moved — they are on the "
+                f"shared (Public) desktop and need administrator rights:"
+                f"\n\n{names}{more}\n\nRetry as administrator?",
+            ),
         )
         if ans != QtWidgets.QMessageBox.StandardButton.Yes:
             return {}
@@ -821,7 +847,7 @@ class Box(QtWidgets.QWidget):
         self.update()
         self.manager.save()
         QtWidgets.QMessageBox.information(
-            self, APP_NAME, f"Перенесено в бокс: {moved}"
+            self, APP_NAME, tr(f"Перенесено в бокс: {moved}", f"Moved into the box: {moved}")
         )
 
     def toggle_move_files(self):
@@ -894,7 +920,7 @@ class Box(QtWidgets.QWidget):
         f.setBold(True)
         p.setFont(f)
         p.setPen(self.label_color)
-        tr = QRect(10, 0, self.width() - (32 if self.rules else 20), HEADER_H)
+        title_rect = QRect(10, 0, self.width() - (32 if self.rules else 20), HEADER_H)
         fm = QtGui.QFontMetrics(f)
         if self.rules:  # small dot: this box sorts the desktop by itself
             dot = QtGui.QColor(self.label_color)
@@ -905,9 +931,9 @@ class Box(QtWidgets.QWidget):
             p.drawEllipse(QtCore.QPointF(self.width() - 14, HEADER_H / 2), 3, 3)
             p.restore()
         p.drawText(
-            tr,
+            title_rect,
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            fm.elidedText(self.title, Qt.TextElideMode.ElideRight, tr.width()),
+            fm.elidedText(self.title, Qt.TextElideMode.ElideRight, title_rect.width()),
         )
 
         if self.shut:
@@ -975,7 +1001,7 @@ class Box(QtWidgets.QWidget):
             p.drawText(
                 QRect(0, HEADER_H, self.width(), self.height() - HEADER_H),
                 int(Qt.AlignmentFlag.AlignCenter),
-                "Перетащи сюда файлы\nили ярлыки",
+                tr("Перетащи сюда файлы\nили ярлыки", "Drop files\nor shortcuts here"),
             )
 
     def _scrollbar_rect(self):
@@ -1102,7 +1128,7 @@ class Box(QtWidgets.QWidget):
         if idx >= 0:
             self.setToolTip(self.items[idx])
         elif pos.y() < HEADER_H and self.rules:
-            self.setToolTip("Автосортировка: " + "; ".join(self.rules))
+            self.setToolTip(tr("Автосортировка: ", "Auto-sort: ") + "; ".join(self.rules))
         else:
             self.setToolTip("")
 
@@ -1504,11 +1530,14 @@ class Box(QtWidgets.QWidget):
             else:
                 QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Не удалось открыть:\n{e}")
+            QtWidgets.QMessageBox.warning(
+                self, APP_NAME, tr(f"Не удалось открыть:\n{e}", f"Could not open:\n{e}")
+            )
 
     def rename(self):
         name, ok = QtWidgets.QInputDialog.getText(
-            self, "Название группы", "Название:", text=self.title
+            self, tr("Название группы", "Group name"), tr("Название:", "Name:"),
+            text=self.title,
         )
         if ok:
             self.title = name.strip() or self.title
@@ -1517,7 +1546,7 @@ class Box(QtWidgets.QWidget):
 
     def pick_color(self):
         col = QtWidgets.QColorDialog.getColor(
-            self.bg_color, self, "Цвет подложки"
+            self.bg_color, self, tr("Цвет подложки", "Background colour")
         )
         if col.isValid():
             self.bg_color = col
@@ -1526,7 +1555,7 @@ class Box(QtWidgets.QWidget):
 
     def pick_label_color(self):
         col = QtWidgets.QColorDialog.getColor(
-            self.label_color, self, "Цвет текста"
+            self.label_color, self, tr("Цвет текста", "Text colour")
         )
         if col.isValid():
             self.label_color = col
@@ -1577,7 +1606,9 @@ class Box(QtWidgets.QWidget):
         self.manager.save()
         self.manager.request_status()
         QtWidgets.QMessageBox.information(
-            self, APP_NAME, f"Удалено битых ссылок: {before - len(self.items)}"
+            self, APP_NAME,
+            tr("Удалено битых ссылок: ", "Broken links removed: ")
+            + str(before - len(self.items)),
         )
 
     def edit_rules(self):
@@ -1589,13 +1620,14 @@ class Box(QtWidgets.QWidget):
         self.manager.save()
         if self.rules and QtWidgets.QMessageBox.question(
             self, APP_NAME,
-            "Разложить по этим правилам то, что уже лежит на рабочем столе?",
+            tr("Разложить по этим правилам то, что уже лежит на рабочем столе?",
+               "Apply these rules to what is already on the desktop?"),
         ) == QtWidgets.QMessageBox.StandardButton.Yes:
             self.manager.sort_desktop(only=self)
 
     def add_via_dialog(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self, "Добавить в группу", os.path.expanduser("~")
+            self, tr("Добавить в группу", "Add to group"), os.path.expanduser("~")
         )
         if files:
             self.add_paths(files)
@@ -1610,44 +1642,47 @@ class Box(QtWidgets.QWidget):
                 self._select_at(idx, Qt.KeyboardModifier.NoModifier)
             paths = self.selection()
             n = f" ({len(paths)})" if len(paths) > 1 else ""
-            m.addAction("Открыть" + n, lambda: self.open_paths(paths))
+            m.addAction(tr("Открыть", "Open") + n, lambda: self.open_paths(paths))
             if len(paths) == 1:
                 m.addAction(
-                    "Показать в проводнике", lambda: self._reveal(paths[0])
+                    tr("Показать в проводнике", "Show in Explorer"), lambda: self._reveal(paths[0])
                 )
             m.addSeparator()
             m.addAction(
-                "Вынести на рабочий стол" + n, lambda: self._remove_paths(paths)
+                tr("Вынести на рабочий стол", "Send to desktop") + n, lambda: self._remove_paths(paths)
             )
             others = [b for b in self.manager.boxes if b is not self]
             if others:
-                move_menu = m.addMenu("Переместить в бокс" + n)
+                move_menu = m.addMenu(tr("Переместить в бокс", "Move to box") + n)
                 for b in others:
                     move_menu.addAction(
                         b.title, lambda _=False, t=b: t.take_from(self, paths)
                     )
             m.addSeparator()
 
-        m.addAction("Переименовать группу…", self.rename)
-        m.addAction("Добавить файлы…", self.add_via_dialog)
+        m.addAction(tr("Переименовать группу…", "Rename group…"), self.rename)
+        m.addAction(tr("Добавить файлы…", "Add files…"), self.add_via_dialog)
         m.addSeparator()
 
-        a = m.addAction("Переносить файлы со стола в бокс")
+        a = m.addAction(tr("Переносить файлы со стола в бокс", "Move desktop files into the box"))
         a.setCheckable(True)
         a.setChecked(self.move_files)
         a.triggered.connect(self.toggle_move_files)
-        m.addAction("Перенести оригиналы со стола в бокс", self.migrate_originals)
-        m.addAction("Открыть папку бокса", self.open_store)
         m.addAction(
-            "Правила автосортировки…" + (" ●" if self.rules else ""),
+            tr("Перенести оригиналы со стола в бокс", "Move desktop originals into the box"),
+            self.migrate_originals,
+        )
+        m.addAction(tr("Открыть папку бокса", "Open box folder"), self.open_store)
+        m.addAction(
+            tr("Правила автосортировки…", "Auto-sort rules…") + (" ●" if self.rules else ""),
             self.edit_rules,
         )
         m.addSeparator()
 
-        m.addAction("Цвет подложки…", self.pick_color)
-        m.addAction("Цвет текста…", self.pick_label_color)
+        m.addAction(tr("Цвет подложки…", "Background colour…"), self.pick_color)
+        m.addAction(tr("Цвет текста…", "Text colour…"), self.pick_label_color)
 
-        alpha_menu = m.addMenu("Прозрачность")
+        alpha_menu = m.addMenu(tr("Прозрачность", "Opacity"))
         wa = QtWidgets.QWidgetAction(alpha_menu)
         slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
         slider.setRange(0, 255)
@@ -1657,14 +1692,14 @@ class Box(QtWidgets.QWidget):
         wa.setDefaultWidget(slider)
         alpha_menu.addAction(wa)
 
-        size_menu = m.addMenu("Размер иконок")
+        size_menu = m.addMenu(tr("Размер иконок", "Icon size"))
         for s in (32, 40, 48, 64, 80, 96):
             a = size_menu.addAction(f"{s} px")
             a.setCheckable(True)
             a.setChecked(s == self.icon_size)
             a.triggered.connect(lambda _=False, v=s: self.set_icon_size(v))
 
-        rad_menu = m.addMenu("Скругление углов")
+        rad_menu = m.addMenu(tr("Скругление углов", "Corner radius"))
         for r in (0, 6, 10, 16, 24):
             a = rad_menu.addAction(str(r))
             a.setCheckable(True)
@@ -1672,24 +1707,24 @@ class Box(QtWidgets.QWidget):
             a.triggered.connect(lambda _=False, v=r: self._set_radius(v))
 
         m.addSeparator()
-        sort_menu = m.addMenu("Сортировать")
-        sort_menu.addAction("По имени", lambda: self.sort_items("name"))
-        sort_menu.addAction("По типу", lambda: self.sort_items("type"))
+        sort_menu = m.addMenu(tr("Сортировать", "Sort"))
+        sort_menu.addAction(tr("По имени", "By name"), lambda: self.sort_items("name"))
+        sort_menu.addAction(tr("По типу", "By type"), lambda: self.sort_items("type"))
 
-        a = m.addAction("Свернуть в заголовок")
+        a = m.addAction(tr("Свернуть в заголовок", "Collapse to header"))
         a.setCheckable(True)
         a.setChecked(self.collapsed)
         a.triggered.connect(self.toggle_collapse)
 
-        a = m.addAction("Зафиксировать")
+        a = m.addAction(tr("Зафиксировать", "Lock"))
         a.setCheckable(True)
         a.setChecked(self.locked)
         a.triggered.connect(self._toggle_lock)
 
-        m.addAction("Убрать битые ссылки", self.clean_missing)
+        m.addAction(tr("Убрать битые ссылки", "Remove broken links"), self.clean_missing)
         m.addSeparator()
-        m.addAction("Новая группа рядом", self.manager.begin_draw)
-        m.addAction("Удалить группу", self._delete_self)
+        m.addAction(tr("Новая группа рядом", "New group"), self.manager.begin_draw)
+        m.addAction(tr("Удалить группу", "Delete group"), self._delete_self)
 
         m.exec(self.mapToGlobal(pos))
 
@@ -1721,8 +1756,12 @@ class Box(QtWidgets.QWidget):
         if failed:
             QtWidgets.QMessageBox.warning(
                 self, APP_NAME,
-                f"Не удалось вынести на рабочий стол: {len(failed)} — файл "
-                "занят или нет прав. Эти элементы оставлены в боксе.",
+                tr(
+                    f"Не удалось вынести на рабочий стол: {len(failed)} — файл "
+                    "занят или нет прав. Эти элементы оставлены в боксе.",
+                    f"Could not send {len(failed)} item(s) to the desktop — "
+                    "in use or no permission. They stay in the box.",
+                ),
             )
 
     def open_paths(self, paths):
@@ -1742,18 +1781,24 @@ class Box(QtWidgets.QWidget):
             dlg = QtWidgets.QMessageBox(self)
             dlg.setWindowTitle(APP_NAME)
             dlg.setText(
-                f"Удалить бокс «{self.title}»?\n\n"
-                f"Внутри лежит файлов: {len(stored)}."
+                tr(
+                    f"Удалить бокс «{self.title}»?\n\n"
+                    f"Внутри лежит файлов: {len(stored)}.",
+                    f"Delete box “{self.title}”?\n\n"
+                    f"It holds {len(stored)} file(s).",
+                )
             )
             eject = dlg.addButton(
-                "Вынести на рабочий стол",
+                tr("Вынести на рабочий стол", "Send to desktop"),
                 QtWidgets.QMessageBox.ButtonRole.AcceptRole,
             )
             keep = dlg.addButton(
-                "Оставить в хранилище",
+                tr("Оставить в хранилище", "Keep in storage"),
                 QtWidgets.QMessageBox.ButtonRole.DestructiveRole,
             )
-            dlg.addButton("Отмена", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            dlg.addButton(
+                tr("Отмена", "Cancel"), QtWidgets.QMessageBox.ButtonRole.RejectRole
+            )
             dlg.exec()
             clicked = dlg.clickedButton()
             if clicked is eject:
@@ -1761,14 +1806,19 @@ class Box(QtWidgets.QWidget):
                 if failed:
                     QtWidgets.QMessageBox.warning(
                         self, APP_NAME,
-                        f"Не удалось вынести файлов: {len(failed)}. "
-                        "Они остались в папке бокса.",
+                        tr(
+                            f"Не удалось вынести файлов: {len(failed)}. "
+                            "Они остались в папке бокса.",
+                            f"{len(failed)} file(s) could not be moved out. "
+                            "They stay in the box folder.",
+                        ),
                     )
             elif clicked is not keep:
                 return
         elif (
             QtWidgets.QMessageBox.question(
-                self, APP_NAME, f"Удалить бокс «{self.title}»?"
+                self, APP_NAME,
+                tr(f"Удалить бокс «{self.title}»?", f"Delete box “{self.title}”?"),
             )
             != QtWidgets.QMessageBox.StandardButton.Yes
         ):
@@ -1803,27 +1853,33 @@ class RulesDialog(QtWidgets.QDialog):
 
     def __init__(self, title, rules, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Автосортировка — {title}")
+        self.setWindowTitle(tr(f"Автосортировка — {title}", f"Auto-sort — {title}"))
         self.setMinimumWidth(460)
         lay = QtWidgets.QVBoxLayout(self)
 
-        hint = QtWidgets.QLabel(
+        hint = QtWidgets.QLabel(tr(
             "Новые файлы на рабочем столе, подходящие под шаблоны, сами "
             "переедут в этот бокс.\n"
             "Шаблоны через «;». «*» — любые символы, «/» в конце — только "
-            "папки (например «*/»). Пусто — правило выключено."
-        )
+            "папки (например «*/»). Пусто — правило выключено.",
+            "New desktop items matching these patterns move into this box "
+            "by themselves.\n"
+            "Separate patterns with “;”. “*” matches anything, a trailing “/” "
+            "matches folders only (e.g. “*/”). Empty turns auto-sort off.",
+        ))
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
         self.edit = QtWidgets.QLineEdit("; ".join(rules))
-        self.edit.setPlaceholderText("*.pdf; *.docx; Скриншот*")
+        self.edit.setPlaceholderText(
+            tr("*.pdf; *.docx; Скриншот*", "*.pdf; *.docx; Screenshot*")
+        )
         self.edit.setClearButtonEnabled(True)
         lay.addWidget(self.edit)
 
         grid = QtWidgets.QGridLayout()
-        for i, (label, patterns) in enumerate(RULE_PRESETS):
-            btn = QtWidgets.QPushButton("+ " + label)
+        for i, (ru, en, patterns) in enumerate(RULE_PRESETS):
+            btn = QtWidgets.QPushButton("+ " + tr(ru, en))
             btn.setToolTip(patterns)
             btn.clicked.connect(lambda _=False, p=patterns: self.add(p))
             grid.addWidget(btn, i // 4, i % 4)
@@ -1874,7 +1930,8 @@ class DrawOverlay(QtWidgets.QWidget):
         p.drawText(
             QRect(0, 40, self.width(), 40),
             int(Qt.AlignmentFlag.AlignHCenter),
-            "Выдели область для новой группы  •  Esc — отмена",
+            tr("Выдели область для новой группы  •  Esc — отмена",
+               "Drag out an area for the new group  •  Esc to cancel"),
         )
         if self._rect.isValid():
             p.setCompositionMode(
@@ -2054,16 +2111,20 @@ class HotkeyDialog(QtWidgets.QDialog):
 
     def __init__(self, current, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Сочетание клавиш")
+        self.setWindowTitle(tr("Сочетание клавиш", "Hotkey"))
         lay = QtWidgets.QVBoxLayout(self)
-        hint = QtWidgets.QLabel(
+        hint = QtWidgets.QLabel(tr(
             "Нажми сочетание для создания новой группы.\n"
-            "Нужен хотя бы один из Ctrl, Alt, Shift или Win."
-        )
+            "Нужен хотя бы один из Ctrl, Alt, Shift или Win.",
+            "Press the key combination that creates a new group.\n"
+            "It needs at least one of Ctrl, Alt, Shift or Win.",
+        ))
         lay.addWidget(hint)
         self.edit = QtWidgets.QKeySequenceEdit(QtGui.QKeySequence(current))
         lay.addWidget(self.edit)
-        reset = QtWidgets.QPushButton(f"По умолчанию ({DEFAULT_HOTKEY})")
+        reset = QtWidgets.QPushButton(
+            tr("По умолчанию", "Default") + f" ({DEFAULT_HOTKEY})"
+        )
         reset.clicked.connect(
             lambda: self.edit.setKeySequence(QtGui.QKeySequence(DEFAULT_HOTKEY))
         )
@@ -2156,6 +2217,7 @@ class Manager(QtCore.QObject):
         self.app = app
         self.boxes = []
         self.settings = {}        # global options saved in boxes.json
+        set_language(None)        # until the config says otherwise
         self._hotkey_filter = None
         self._unloaded = []       # raw entries that failed to load - kept as is
         self.load_notice = None   # set when the config needed rescuing
@@ -2237,7 +2299,8 @@ class Manager(QtCore.QObject):
                     groups.setdefault(box, []).append(path)
         moved = sum(b.add_paths(paths) for b, paths in groups.items())
         QtWidgets.QMessageBox.information(
-            None, APP_NAME, f"Разложено по боксам: {moved}"
+            None, APP_NAME,
+            tr(f"Разложено по боксам: {moved}", f"Sorted into boxes: {moved}"),
         )
         return moved
 
@@ -2318,7 +2381,9 @@ class Manager(QtCore.QObject):
             conn.deleteLater()
         self.show_all()
         self.tray.showMessage(
-            APP_NAME, "Deskfinity уже запущен — он здесь, в трее.",
+            APP_NAME,
+            tr("Deskfinity уже запущен — он здесь, в трее.",
+               "Deskfinity is already running — it lives in the tray."),
             QtWidgets.QSystemTrayIcon.MessageIcon.Information, 4000,
         )
 
@@ -2385,30 +2450,67 @@ class Manager(QtCore.QObject):
     def _build_tray(self):
         self.tray = QtWidgets.QSystemTrayIcon(self._tray_icon())
         self.tray.setToolTip(APP_NAME)
+        self._tray_menu = None
+        self._build_tray_menu()
+        self.tray.activated.connect(self._tray_click)
+        self.tray.show()
+
+    def _build_tray_menu(self):
         m = QtWidgets.QMenu()
         self._new_action = m.addAction("", self.begin_draw)
         self._update_tray_labels()
         m.addSeparator()
-        m.addAction("Показать все", self.show_all)
-        m.addAction("Скрыть все", self.hide_all)
+        m.addAction(tr("Показать все", "Show all"), self.show_all)
+        m.addAction(tr("Скрыть все", "Hide all"), self.hide_all)
         m.addSeparator()
-        m.addAction("Обновить иконки", self.refresh_icons)
-        m.addAction("Открыть папку настроек", self.open_config_dir)
-        m.addAction("Разложить рабочий стол по правилам", lambda: self.sort_desktop())
-        m.addAction("Восстановить файлы из хранилища…", self.recover_storage)
-        m.addAction("Сочетание клавиш…", self.edit_hotkey)
-        a = m.addAction("Запускать с Windows")
+        m.addAction(tr("Обновить иконки", "Refresh icons"), self.refresh_icons)
+        m.addAction(
+            tr("Открыть папку настроек", "Open settings folder"),
+            self.open_config_dir,
+        )
+        m.addAction(
+            tr("Разложить рабочий стол по правилам", "Sort desktop by rules"),
+            lambda: self.sort_desktop(),
+        )
+        m.addAction(
+            tr("Восстановить файлы из хранилища…", "Recover files from storage…"),
+            self.recover_storage,
+        )
+        m.addAction(tr("Сочетание клавиш…", "Hotkey…"), self.edit_hotkey)
+        lang_menu = m.addMenu("Язык / Language")
+        group = QtGui.QActionGroup(lang_menu)
+        current = self.settings.get("lang", "auto")
+        for code, label in (
+            ("auto", tr("Как в Windows", "Same as Windows")),
+            ("ru", "Русский"),
+            ("en", "English"),
+        ):
+            a = lang_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(code == current or (code == "auto" and current not in ("ru", "en")))
+            a.setActionGroup(group)
+            a.triggered.connect(lambda _=False, c=code: self.set_ui_language(c))
+        a = m.addAction(tr("Запускать с Windows", "Start with Windows"))
         a.setCheckable(True)
         a.setChecked(self._autostart_enabled())
         a.triggered.connect(self._toggle_autostart)
         m.addSeparator()
-        m.addAction("Выход", self.quit)
+        m.addAction(tr("Выход", "Quit"), self.quit)
         self.tray.setContextMenu(m)
-        self.tray.activated.connect(self._tray_click)
-        self.tray.show()
+        if self._tray_menu is not None:
+            self._tray_menu.deleteLater()
+        self._tray_menu = m
+
+    def set_ui_language(self, code):
+        self.settings["lang"] = code
+        set_language(code)
+        self._build_tray_menu()
+        for b in self.boxes:
+            b.update()
+        self.save()
 
     def _update_tray_labels(self):
-        label = "Новая группа"
+        label = tr("Новая группа", "New group")
         if self.hotkey_ok:
             label += f" ({self.hotkey_text()})"
         self._new_action.setText(label)
@@ -2436,14 +2538,18 @@ class Manager(QtCore.QObject):
         if hotkey_to_win(text) is None:
             QtWidgets.QMessageBox.warning(
                 None, APP_NAME,
-                "Это сочетание не подходит: нужна обычная клавиша вместе с "
-                "Ctrl, Alt, Shift или Win.",
+                tr("Это сочетание не подходит: нужна обычная клавиша вместе с "
+                   "Ctrl, Alt, Shift или Win.",
+                   "That combination won't work: use a regular key together "
+                   "with Ctrl, Alt, Shift or Win."),
             )
         elif not self.set_hotkey(text):
             QtWidgets.QMessageBox.warning(
                 None, APP_NAME,
-                f"{text} уже занято другой программой. "
-                f"Оставлено {self.hotkey_text()}.",
+                tr(f"{text} уже занято другой программой. "
+                   f"Оставлено {self.hotkey_text()}.",
+                   f"{text} is already used by another program. "
+                   f"Keeping {self.hotkey_text()}."),
             )
 
     def _tray_click(self, reason):
@@ -2596,6 +2702,7 @@ class Manager(QtCore.QObject):
         restored = False
         try:
             entries, self.settings = self._read_config(path)
+            set_language(self.settings.get("lang"))
             if path == CONFIG_PATH:
                 self._backup()
         except Exception:
@@ -2608,19 +2715,26 @@ class Manager(QtCore.QObject):
                     entries, self.settings = self._read_config(bak)
                 except Exception:
                     continue
+                set_language(self.settings.get("lang"))
                 log.warning("Restored the layout from %s", bak)
                 restored = True
-                self.load_notice = (
+                self.load_notice = tr(
                     f"Файл настроек повреждён (копия: {kept}). "
                     f"Раскладка восстановлена из резервной копии "
-                    f"{os.path.basename(bak)}."
+                    f"{os.path.basename(bak)}.",
+                    f"The settings file was damaged (copy kept: {kept}). "
+                    f"The layout was restored from backup "
+                    f"{os.path.basename(bak)}.",
                 )
                 break
             if entries is None:
-                self.load_notice = (
+                self.load_notice = tr(
                     f"Файл настроек повреждён и не прочитан (копия: {kept}). "
                     "Файлы боксов целы — верни их через трей: "
-                    "«Восстановить файлы из хранилища»."
+                    "«Восстановить файлы из хранилища».",
+                    f"The settings file was damaged and could not be read "
+                    f"(copy kept: {kept}). Box files are safe — bring them "
+                    "back via tray → “Recover files from storage”.",
                 )
                 return
 
@@ -2634,10 +2748,13 @@ class Manager(QtCore.QObject):
             self.boxes.append(f)
             f.show()
         if self._unloaded and not self.load_notice:
-            self.load_notice = (
+            self.load_notice = tr(
                 f"Не удалось загрузить боксов: {len(self._unloaded)}. "
                 "Их данные сохранены в boxes.json без изменений, "
-                "подробности — в deskfinity.log."
+                "подробности — в deskfinity.log.",
+                f"{len(self._unloaded)} box(es) could not be loaded. Their "
+                "data is kept unchanged in boxes.json; details are in "
+                "deskfinity.log.",
             )
         if (path != CONFIG_PATH or restored) and self.boxes:
             self._write()  # migrate to the new location / replace the broken file
@@ -2661,7 +2778,9 @@ class Manager(QtCore.QObject):
 
         if not found:
             QtWidgets.QMessageBox.information(
-                None, APP_NAME, "В хранилище нет файлов без бокса."
+                None, APP_NAME,
+                tr("В хранилище нет файлов без бокса.",
+                   "No orphaned files in storage."),
             )
             return
 
@@ -2670,7 +2789,7 @@ class Manager(QtCore.QObject):
             # reusing the folder name as uid makes the new box own those files
             box = Box(self, {
                 "uid": uid,
-                "title": "Восстановлено",
+                "title": tr("Восстановлено", "Recovered"),
                 "items": items,
                 "geometry": [
                     avail.x() + 60 + 40 * k, avail.y() + 60 + 40 * k, 340, 280
@@ -2682,8 +2801,9 @@ class Manager(QtCore.QObject):
         self.save()
         QtWidgets.QMessageBox.information(
             None, APP_NAME,
-            f"Восстановлено боксов: {len(found)}, "
-            f"файлов: {sum(len(i) for _, i in found)}.",
+            tr(f"Восстановлено боксов: {len(found)}, ",
+               f"Recovered boxes: {len(found)}, ")
+            + tr("файлов: ", "files: ") + f"{sum(len(i) for _, i in found)}.",
         )
 
     @staticmethod
@@ -2749,16 +2869,19 @@ def main():
     elif IS_WINDOWS and not mgr.hotkey_ok:
         mgr.tray.showMessage(
             APP_NAME,
-            f"Сочетание {mgr.hotkey_text()} занято другой программой. "
-            "Новую группу можно создать кликом по иконке в трее "
-            "или выбрать другое сочетание там же.",
+            tr(f"Сочетание {mgr.hotkey_text()} занято другой программой. "
+               "Новую группу можно создать кликом по иконке в трее "
+               "или выбрать другое сочетание там же.",
+               f"{mgr.hotkey_text()} is taken by another program. Click the "
+               "tray icon to create a group, or pick another hotkey there."),
             QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
             8000,
         )
     elif not mgr.boxes:
         mgr.tray.showMessage(
             APP_NAME,
-            "Клик по иконке в трее — создать новую группу.",
+            tr("Клик по иконке в трее — создать новую группу.",
+               "Click the tray icon to create a new group."),
             QtWidgets.QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
