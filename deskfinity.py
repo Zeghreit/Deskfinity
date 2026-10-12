@@ -28,6 +28,7 @@ import ctypes
 import time
 import getpass
 import logging
+import threading
 import subprocess
 from ctypes import wintypes
 from logging.handlers import RotatingFileHandler
@@ -465,6 +466,12 @@ class IconCache:
 
 ICONS = None  # created after QApplication exists
 
+# path -> (exists, is_dir). Filled by Manager on a worker thread: on an
+# offline network path os.path.exists() can block for seconds, so it must
+# never run inside paintEvent.
+STATUS = {}
+STATUS_INTERVAL_MS = 4000
+
 
 # --------------------------------------------------------------------------- #
 #  A single box window
@@ -765,7 +772,10 @@ class Box(QtWidgets.QWidget):
             ph = round(pm.height() / pm.devicePixelRatio())
             ix = r.x() + (r.width() - pw) // 2
             iy = r.y() + 5 + (self.icon_size - ph) // 2
-            if not os.path.exists(path_i):
+            exists = STATUS.get(path_i, (None, False))[0]
+            if exists is None:
+                self.manager.request_status()
+            elif not exists:
                 p.setOpacity(0.45)
             p.drawPixmap(ix, iy, pm)
             p.setOpacity(1.0)
@@ -1084,6 +1094,7 @@ class Box(QtWidgets.QWidget):
         self.items = [p for p in self.items if os.path.exists(p)]
         self.update()
         self.manager.save()
+        self.manager.request_status()
         QtWidgets.QMessageBox.information(
             self, APP_NAME, f"Удалено битых ссылок: {before - len(self.items)}"
         )
@@ -1398,6 +1409,7 @@ def another_instance_running():
 #  Manager / tray
 # --------------------------------------------------------------------------- #
 class Manager(QtCore.QObject):
+    _status_ready = QtCore.pyqtSignal(object)  # emitted from a worker thread
 
     def __init__(self, app):
         super().__init__()
@@ -1411,10 +1423,51 @@ class Manager(QtCore.QObject):
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self._write)
 
+        self._status_busy = False
+        self._status_again = False
+        self._status_ready.connect(self._apply_status)
+        self._status_timer = QtCore.QTimer(self)
+        self._status_timer.setInterval(STATUS_INTERVAL_MS)
+        self._status_timer.timeout.connect(self.request_status)
+
         self._listen_for_instances()
         self.hotkey_ok = self._install_hotkey()
         self._build_tray()
         self.load()
+        self.request_status()
+        self._status_timer.start()
+
+    # --------------------------------------------------------- item status
+    def request_status(self):
+        """Re-check which items exist, off the UI thread. Cheap to call."""
+        if self._status_busy:
+            self._status_again = True
+            return
+        self._status_busy = True
+        self._status_again = False
+        paths = {p for b in self.boxes for p in b.items}
+        threading.Thread(
+            target=self._check_status, args=(paths,), daemon=True
+        ).start()
+
+    def _check_status(self, paths):
+        result = {}
+        for p in paths:
+            try:
+                result[p] = (os.path.exists(p), os.path.isdir(p))
+            except Exception:
+                result[p] = (False, False)
+        self._status_ready.emit(result)
+
+    def _apply_status(self, result):
+        self._status_busy = False
+        changed = any(STATUS.get(p) != v for p, v in result.items())
+        STATUS.update(result)
+        if changed:
+            for b in self.boxes:
+                b.update()
+        if self._status_again:
+            self.request_status()
 
     # ----------------------------------------------------- single instance
     def _listen_for_instances(self):
