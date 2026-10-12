@@ -565,7 +565,7 @@ class Box(QtWidgets.QWidget):
     def to_dict(self):
         g = self.geometry()
         h = self._expanded_h if self.collapsed else g.height()
-        pos = self._home or g.topLeft()
+        pos = self._home if self._home is not None else g.topLeft()
         return {
             "uid": self.uid,
             "title": self.title,
@@ -1455,7 +1455,12 @@ def _ping_instance():
     sock.connectToServer(_instance_key())
     if not sock.waitForConnected(500):
         return False
-    sock.disconnectFromServer()
+    # Stay connected until the server hangs up: on Windows a pipe client that
+    # disconnects before the server accepts it is dropped without a signal.
+    sock.write(b"show")
+    sock.waitForBytesWritten(500)
+    sock.waitForDisconnected(1000)
+    sock.abort()
     return True
 
 
@@ -1570,7 +1575,8 @@ class Manager(QtCore.QObject):
     def _on_instance_knock(self):
         while self._ipc.hasPendingConnections():
             conn = self._ipc.nextPendingConnection()
-            conn.disconnected.connect(conn.deleteLater)
+            conn.abort()  # the knock itself is the message
+            conn.deleteLater()
         self.show_all()
         self.tray.showMessage(
             APP_NAME, "Deskfinity уже запущен — он здесь, в трее.",
@@ -1799,6 +1805,7 @@ class Manager(QtCore.QObject):
             path = self._legacy_config()
             if not path:
                 return
+        restored = False
         try:
             entries = self._read_entries(path)
             if path == CONFIG_PATH:
@@ -1814,6 +1821,7 @@ class Manager(QtCore.QObject):
                 except Exception:
                     continue
                 log.warning("Restored the layout from %s", bak)
+                restored = True
                 self.load_notice = (
                     f"Файл настроек повреждён (копия: {kept}). "
                     f"Раскладка восстановлена из резервной копии "
@@ -1843,8 +1851,8 @@ class Manager(QtCore.QObject):
                 "Их данные сохранены в boxes.json без изменений, "
                 "подробности — в deskfinity.log."
             )
-        if path != CONFIG_PATH and self.boxes:
-            self._write()  # migrate to the new location
+        if (path != CONFIG_PATH or restored) and self.boxes:
+            self._write()  # migrate to the new location / replace the broken file
 
     def recover_storage(self):
         """Bring back storage folders that no box owns any more."""
