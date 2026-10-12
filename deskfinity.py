@@ -25,9 +25,10 @@ import json
 import uuid
 import shutil
 import ctypes
+import logging
 import subprocess
-import traceback
 from ctypes import wintypes
+from logging.handlers import RotatingFileHandler
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt, QRect, QPoint, QSize
@@ -41,9 +42,41 @@ CONFIG_DIR = os.path.join(
 CONFIG_PATH = os.path.join(CONFIG_DIR, "boxes.json")
 STORE_DIR = os.path.join(CONFIG_DIR, "storage")
 
+LOG_PATH = os.path.join(CONFIG_DIR, "deskfinity.log")
+
+log = logging.getLogger(APP_NAME)
+
 HEADER_H = 26
 EDGE = 7          # resize hit zone
 MIN_W, MIN_H = 160, 110
+
+
+# --------------------------------------------------------------------------- #
+#  Logging - pythonw has no console, so errors go to a file
+# --------------------------------------------------------------------------- #
+def setup_logging():
+    log.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        fh = RotatingFileHandler(
+            LOG_PATH, maxBytes=512 * 1024, backupCount=2, encoding="utf-8"
+        )
+        fh.setFormatter(fmt)
+        log.addHandler(fh)
+    except Exception:
+        pass
+    if sys.stderr is not None:  # running under python.exe
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        log.addHandler(sh)
+
+    # Without a custom hook PyQt6 aborts the process on any exception raised
+    # inside a slot; log it and keep running instead.
+    def _excepthook(etype, value, tb):
+        log.error("Unhandled exception", exc_info=(etype, value, tb))
+
+    sys.excepthook = _excepthook
 
 
 # --------------------------------------------------------------------------- #
@@ -375,9 +408,12 @@ def elevated_move(pairs, parent=None):
             creationflags=0x08000000, timeout=180,
         )
     except Exception:
-        traceback.print_exc()
+        log.exception("Elevated move failed")
         return []
-    return [(s, d) for s, d in pairs if os.path.exists(d)]
+    landed = [(s, d) for s, d in pairs if os.path.exists(d)]
+    for s, d in landed:
+        log.info("Moved (elevated) %s -> %s", s, d)
+    return landed
 
 
 # --------------------------------------------------------------------------- #
@@ -529,9 +565,11 @@ class Box(QtWidgets.QWidget):
         target = unique_target(self.store_dir(), os.path.basename(path))
         try:
             shutil.move(path, target)
+            log.info("Moved %s -> %s", path, target)
             return target, None
-        except Exception:
+        except Exception as e:
             # typically C:\Users\Public\Desktop - needs elevation
+            log.warning("Could not move %s: %s", path, e)
             return path, (path, target)
 
     def _eject(self, path):
@@ -541,8 +579,10 @@ class Box(QtWidgets.QWidget):
         target = unique_target(desktop_dir(), os.path.basename(path))
         try:
             shutil.move(path, target)
+            log.info("Moved %s -> %s", path, target)
             return True
-        except Exception:
+        except Exception as e:
+            log.warning("Could not move %s back to the desktop: %s", path, e)
             return False
 
     def _resolve_pending(self, pending):
@@ -1302,23 +1342,27 @@ class Manager(QtCore.QObject):
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self._write)
 
+        self.hotkey_ok = self._install_hotkey()
         self._build_tray()
         self.load()
-        self._install_hotkey()
 
     # ------------------------------------------------------------- hotkey
     def _install_hotkey(self):
-        """Global Ctrl+Alt+F -> start drawing a new box."""
+        """Global Ctrl+Alt+F -> start drawing a new box. True on success."""
         self._hotkey_filter = None
         if not IS_WINDOWS:
-            return
+            return False
         MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
         VK_F = 0x46
         ok = user32.RegisterHotKey(
             None, 1, MOD_ALT | MOD_CONTROL | MOD_NOREPEAT, VK_F
         )
         if not ok:
-            return
+            log.warning(
+                "Ctrl+Alt+F is already taken by another program (error %d)",
+                ctypes.get_last_error(),
+            )
+            return False
 
         manager = self
 
@@ -1337,6 +1381,7 @@ class Manager(QtCore.QObject):
 
         self._hotkey_filter = _Filter()
         self.app.installNativeEventFilter(self._hotkey_filter)
+        return True
 
     # ---------------------------------------------------------------- tray
     def _tray_icon(self):
@@ -1359,7 +1404,10 @@ class Manager(QtCore.QObject):
         self.tray = QtWidgets.QSystemTrayIcon(self._tray_icon())
         self.tray.setToolTip(APP_NAME)
         m = QtWidgets.QMenu()
-        m.addAction("Новая группа (Ctrl+Alt+F)", self.begin_draw)
+        m.addAction(
+            "Новая группа (Ctrl+Alt+F)" if self.hotkey_ok else "Новая группа",
+            self.begin_draw,
+        )
         m.addSeparator()
         m.addAction("Показать все", self.show_all)
         m.addAction("Скрыть все", self.hide_all)
@@ -1474,7 +1522,7 @@ class Manager(QtCore.QObject):
                 json.dump(data, fh, ensure_ascii=False, indent=2)
             os.replace(tmp, CONFIG_PATH)
         except Exception:
-            traceback.print_exc()
+            log.exception("Could not save %s", CONFIG_PATH)
 
     def load(self):
         path = CONFIG_PATH
@@ -1492,7 +1540,7 @@ class Manager(QtCore.QObject):
             if path != CONFIG_PATH and self.boxes:
                 self._write()  # migrate to the new location
         except Exception:
-            traceback.print_exc()
+            log.exception("Could not load %s", path)
 
     @staticmethod
     def _legacy_config():
@@ -1534,6 +1582,9 @@ def main():
         except Exception:
             pass
 
+    setup_logging()
+    log.info("Starting %s", APP_NAME)
+
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
@@ -1541,7 +1592,15 @@ def main():
     ICONS = IconCache()
     mgr = Manager(app)
 
-    if not mgr.boxes:
+    if IS_WINDOWS and not mgr.hotkey_ok:
+        mgr.tray.showMessage(
+            APP_NAME,
+            "Сочетание Ctrl+Alt+F занято другой программой. "
+            "Новую группу можно создать кликом по иконке в трее.",
+            QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+            8000,
+        )
+    elif not mgr.boxes:
         mgr.tray.showMessage(
             APP_NAME,
             "Клик по иконке в трее — создать новую группу.",

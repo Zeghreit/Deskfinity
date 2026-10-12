@@ -95,6 +95,9 @@ Config: `%APPDATA%\Deskfinity\boxes.json` — plain JSON, safe to edit by hand.
 Files owned by boxes live in `%APPDATA%\Deskfinity\storage\`. The tray menu has
 an "open settings folder" entry.
 
+Log: `%APPDATA%\Deskfinity\deskfinity.log` — errors, plus every file the app
+moves (from where to where), so nothing gets lost without a trace.
+
 Autostart is toggled from the tray and writes to
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
@@ -206,6 +209,9 @@ pythonw deskfinity.py
 Конфиг: `%APPDATA%\Deskfinity\boxes.json` — обычный JSON, можно править руками.
 Файлы боксов лежат в `%APPDATA%\Deskfinity\storage\`. В трее есть пункт
 «Открыть папку настроек».
+
+Журнал: `%APPDATA%\Deskfinity\deskfinity.log` — ошибки и каждый перенос файла
+(откуда и куда), чтобы ничего не терялось бесследно.
 
 Автозапуск включается из трея и пишет ключ в
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
