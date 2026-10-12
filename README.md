@@ -124,6 +124,18 @@ Autostart is toggled from the tray and writes to
   Personalisation → Themes → Desktop icon settings.
 - No quick-hide of all boxes by double-clicking empty desktop.
 
+## Tests
+
+```
+pip install PyQt6
+python -m unittest discover -s tests
+```
+
+They run headless (`QT_QPA_PLATFORM=offscreen`) on any OS and cover file
+moving, config rescue, resizing, single instance, HiDPI icons, background
+status checks and screen changes. The WinAPI parts (icon extraction, z-order,
+UAC retry) still need a manual check on Windows.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
@@ -252,6 +264,12 @@ pythonw deskfinity.py
   `::{645FF040-5081-101B-9F08-00AA002F954E}`) в работе; родные значки при этом
   отключаются отдельно: Персонализация → Темы → Параметры значков рабочего стола.
 - Нет быстрого скрытия всех боксов по двойному клику на пустом месте стола.
+
+## Тесты
+
+`python -m unittest discover -s tests` — работают без экрана на любой ОС. Части
+на WinAPI (иконки, z-order, повтор через UAC) по-прежнему проверяются вручную
+на Windows.
 
 ## Лицензия
 
