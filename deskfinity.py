@@ -25,6 +25,7 @@ import json
 import uuid
 import shutil
 import ctypes
+import fnmatch
 import time
 import getpass
 import logging
@@ -359,11 +360,15 @@ def desktop_dir():
     return _shell_folder(0x0010) or os.path.join(os.path.expanduser("~"), "Desktop")
 
 
-def desktop_dirs():
-    """The user's and the shared (Public) Desktop folders, normalised."""
+def desktop_folders():
+    """The user's and the shared (Public) Desktop folders."""
     # CSIDL_COMMON_DESKTOPDIRECTORY = 0x0019
-    dirs = [desktop_dir(), _shell_folder(0x0019)]
-    return {os.path.normcase(os.path.abspath(d)) for d in dirs if d}
+    return [d for d in (desktop_dir(), _shell_folder(0x0019)) if d]
+
+
+def desktop_dirs():
+    """desktop_folders(), normalised for comparisons."""
+    return {os.path.normcase(os.path.abspath(d)) for d in desktop_folders()}
 
 
 def on_desktop(path):
@@ -430,6 +435,72 @@ def elevated_move(pairs, parent=None):
     for s, d in landed:
         log.info("Moved (elevated) %s -> %s", s, d)
     return landed
+
+
+# --------------------------------------------------------------------------- #
+#  Auto-sort rules
+# --------------------------------------------------------------------------- #
+# A rule is a name pattern: "*" / "?" wildcards, case-insensitive. Plain
+# patterns match files; a trailing "/" matches folders instead ("*/").
+RULE_PRESETS = [
+    ("Документы", "*.pdf; *.doc; *.docx; *.odt; *.rtf; *.txt; *.md; "
+                  "*.xls; *.xlsx; *.ods; *.csv; *.ppt; *.pptx; *.odp"),
+    ("Картинки", "*.png; *.jpg; *.jpeg; *.gif; *.bmp; *.webp; *.svg; "
+                 "*.tif; *.tiff; *.heic; *.psd"),
+    ("Видео", "*.mp4; *.mkv; *.avi; *.mov; *.webm; *.wmv"),
+    ("Музыка", "*.mp3; *.wav; *.flac; *.ogg; *.m4a; *.aac"),
+    ("Архивы", "*.zip; *.rar; *.7z; *.tar; *.gz; *.bz2; *.xz"),
+    ("Установщики", "*.exe; *.msi; *.msix; *.appx"),
+    ("Ярлыки", "*.lnk; *.url"),
+    ("Папки", "*/"),
+]
+
+# never auto-sorted: half-downloaded files, Office lock files, shell files
+_SORT_SKIP_SUFFIXES = (
+    ".tmp", ".crdownload", ".part", ".partial", ".download", ".opdownload",
+)
+_SORT_SKIP_NAMES = {"desktop.ini", "thumbs.db"}
+
+
+def parse_rules(text):
+    """Patterns from "a; b, c" (also newlines), trimmed and de-duplicated."""
+    out = []
+    for raw in text.replace(",", ";").replace("\n", ";").split(";"):
+        pat = raw.strip()
+        if pat and pat.lower() not in (o.lower() for o in out):
+            out.append(pat)
+    return out
+
+
+def rules_match(rules, name, is_dir):
+    """True if any pattern in *rules* matches an item called *name*."""
+    name = name.lower()
+    for pat in rules:
+        pat = pat.lower()
+        if pat.endswith("/"):
+            if is_dir and fnmatch.fnmatchcase(name, pat[:-1] or "*"):
+                return True
+        elif not is_dir and fnmatch.fnmatchcase(name, pat):
+            return True
+    return False
+
+
+def skip_for_sorting(path):
+    """Items auto-sort must leave alone (temporary, hidden or system)."""
+    name = os.path.basename(path).lower()
+    if (
+        name in _SORT_SKIP_NAMES
+        or name.startswith("~$")
+        or name.endswith(_SORT_SKIP_SUFFIXES)
+    ):
+        return True
+    if IS_WINDOWS:
+        try:
+            # FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+            return bool(os.stat(path).st_file_attributes & 0x6)
+        except (OSError, AttributeError):
+            return True
+    return name.startswith(".")
 
 
 # --------------------------------------------------------------------------- #
@@ -537,6 +608,7 @@ class Box(QtWidgets.QWidget):
         self.label_color = QtGui.QColor(*d.get("label_color", [235, 235, 240]))
         self.collapsed = bool(d.get("collapsed", False))
         self.locked = bool(d.get("locked", False))
+        self.rules = [r for r in d.get("rules", []) if isinstance(r, str)]
 
         g = d.get("geometry", [200, 200, 320, 260])
         self._expanded_h = g[3]
@@ -583,6 +655,7 @@ class Box(QtWidgets.QWidget):
             ],
             "collapsed": self.collapsed,
             "locked": self.locked,
+            "rules": self.rules,
         }
 
     # ------------------------------------------------------- file relocation
@@ -628,11 +701,12 @@ class Box(QtWidgets.QWidget):
         target = unique_target(desktop_dir(), os.path.basename(path))
         try:
             shutil.move(path, target)
-            log.info("Moved %s -> %s", path, target)
-            return True
         except Exception as e:
             log.warning("Could not move %s back to the desktop: %s", path, e)
             return False
+        log.info("Moved %s -> %s", path, target)
+        self.manager.placed_on_desktop(target)  # auto-sort leaves it there
+        return True
 
     def _resolve_pending(self, pending):
         """Offer an elevated retry for items that could not be moved."""
@@ -659,7 +733,12 @@ class Box(QtWidgets.QWidget):
                     n += 1
         return n
 
-    def add_paths(self, paths):
+    def add_paths(self, paths, ask=True):
+        """Add items; desktop items are moved in. Returns how many were added.
+
+        With ask=False (auto-sort) an item that cannot be moved without admin
+        rights is skipped instead of raising a UAC prompt.
+        """
         existing = {p.lower() for p in self.items}
         added, pending = 0, []
         for p in paths:
@@ -667,6 +746,8 @@ class Box(QtWidgets.QWidget):
             if p.lower() in existing:
                 continue
             new_path, pend = self._ingest(p)
+            if pend and not ask:
+                continue
             if pend:
                 pending.append(pend)
             self.items.append(new_path)
@@ -771,8 +852,16 @@ class Box(QtWidgets.QWidget):
         f.setBold(True)
         p.setFont(f)
         p.setPen(self.label_color)
-        tr = QRect(10, 0, self.width() - 20, HEADER_H)
+        tr = QRect(10, 0, self.width() - (32 if self.rules else 20), HEADER_H)
         fm = QtGui.QFontMetrics(f)
+        if self.rules:  # small dot: this box sorts the desktop by itself
+            dot = QtGui.QColor(self.label_color)
+            dot.setAlpha(170)
+            p.save()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(dot)
+            p.drawEllipse(QtCore.QPointF(self.width() - 14, HEADER_H / 2), 3, 3)
+            p.restore()
         p.drawText(
             tr,
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
@@ -943,6 +1032,8 @@ class Box(QtWidgets.QWidget):
             self.update()
         if idx >= 0:
             self.setToolTip(self.items[idx])
+        elif pos.y() < HEADER_H and self.rules:
+            self.setToolTip("Автосортировка: " + "; ".join(self.rules))
         else:
             self.setToolTip("")
 
@@ -1162,6 +1253,19 @@ class Box(QtWidgets.QWidget):
             self, APP_NAME, f"Удалено битых ссылок: {before - len(self.items)}"
         )
 
+    def edit_rules(self):
+        dlg = RulesDialog(self.title, self.rules, self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.rules = dlg.patterns()
+        self.update()
+        self.manager.save()
+        if self.rules and QtWidgets.QMessageBox.question(
+            self, APP_NAME,
+            "Разложить по этим правилам то, что уже лежит на рабочем столе?",
+        ) == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.manager.sort_desktop(only=self)
+
     def add_via_dialog(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self, "Добавить в группу", os.path.expanduser("~")
@@ -1196,6 +1300,10 @@ class Box(QtWidgets.QWidget):
         a.triggered.connect(self.toggle_move_files)
         m.addAction("Перенести оригиналы со стола в бокс", self.migrate_originals)
         m.addAction("Открыть папку бокса", self.open_store)
+        m.addAction(
+            "Правила автосортировки…" + (" ●" if self.rules else ""),
+            self.edit_rules,
+        )
         m.addSeparator()
 
         m.addAction("Цвет подложки…", self.pick_color)
@@ -1335,6 +1443,54 @@ class Box(QtWidgets.QWidget):
 
 
 # --------------------------------------------------------------------------- #
+#  Auto-sort rules editor
+# --------------------------------------------------------------------------- #
+class RulesDialog(QtWidgets.QDialog):
+
+    def __init__(self, title, rules, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Автосортировка — {title}")
+        self.setMinimumWidth(460)
+        lay = QtWidgets.QVBoxLayout(self)
+
+        hint = QtWidgets.QLabel(
+            "Новые файлы на рабочем столе, подходящие под шаблоны, сами "
+            "переедут в этот бокс.\n"
+            "Шаблоны через «;». «*» — любые символы, «/» в конце — только "
+            "папки (например «*/»). Пусто — правило выключено."
+        )
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self.edit = QtWidgets.QLineEdit("; ".join(rules))
+        self.edit.setPlaceholderText("*.pdf; *.docx; Скриншот*")
+        self.edit.setClearButtonEnabled(True)
+        lay.addWidget(self.edit)
+
+        grid = QtWidgets.QGridLayout()
+        for i, (label, patterns) in enumerate(RULE_PRESETS):
+            btn = QtWidgets.QPushButton("+ " + label)
+            btn.setToolTip(patterns)
+            btn.clicked.connect(lambda _=False, p=patterns: self.add(p))
+            grid.addWidget(btn, i // 4, i % 4)
+        lay.addLayout(grid)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def add(self, patterns):
+        self.edit.setText("; ".join(parse_rules(self.edit.text() + ";" + patterns)))
+
+    def patterns(self):
+        return parse_rules(self.edit.text())
+
+
+# --------------------------------------------------------------------------- #
 #  Fullscreen overlay used to draw a new box
 # --------------------------------------------------------------------------- #
 class DrawOverlay(QtWidgets.QWidget):
@@ -1411,6 +1567,76 @@ class DrawOverlay(QtWidgets.QWidget):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Escape:
             self.close()
+
+
+# --------------------------------------------------------------------------- #
+#  Desktop watcher for auto-sort rules
+# --------------------------------------------------------------------------- #
+class DesktopSorter(QtCore.QObject):
+    """Moves items that newly appear on the Desktop into matching boxes.
+
+    Items present at start-up are left alone (that is what "sort now" is
+    for). A new item waits until it has been quiet for SETTLE_S seconds, so
+    downloads, copies and an in-place rename are not snatched mid-way; a
+    move that fails (file in use) is retried a few times.
+    """
+    SETTLE_S = 6.0
+    MAX_TRIES = 5
+
+    def __init__(self, manager):
+        super().__init__(manager)
+        self.manager = manager
+        self.folder = desktop_dir()
+        self._seen = self._listing()
+        self._tries = {}
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(1500)
+        self._timer.timeout.connect(self.scan)
+        self._watcher = QtCore.QFileSystemWatcher(self)
+        if os.path.isdir(self.folder):
+            self._watcher.addPath(self.folder)
+        self._watcher.directoryChanged.connect(lambda *_: self._timer.start())
+
+    def _listing(self):
+        try:
+            return set(os.listdir(self.folder))
+        except OSError:
+            return set()
+
+    def leave_alone(self, path):
+        """*path* was put on the Desktop on purpose - do not sort it."""
+        if os.path.normcase(os.path.dirname(path)) == os.path.normcase(self.folder):
+            self._seen.add(os.path.basename(path))
+
+    def scan(self):
+        names = self._listing()
+        self._seen &= names            # forget items that left the Desktop
+        again, now = False, time.time()
+        for name in sorted(names - self._seen):
+            path = os.path.join(self.folder, name)
+            if skip_for_sorting(path):
+                self._seen.add(name)
+                continue
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            # ctime is the creation time on Windows - covers copied files too
+            if now - max(st.st_mtime, st.st_ctime) < self.SETTLE_S:
+                again = True
+                continue
+            if not self.manager.sort_item(path):
+                tries = self._tries.get(name, 0) + 1
+                self._tries[name] = tries
+                if tries < self.MAX_TRIES:
+                    again = True
+                    continue
+                log.warning("Auto-sort gave up on %s", path)
+            self._seen.add(name)
+            self._tries.pop(name, None)
+        if again:
+            self._timer.start()
 
 
 # --------------------------------------------------------------------------- #
@@ -1515,6 +1741,61 @@ class Manager(QtCore.QObject):
         self.fit_boxes()
         self.request_status()
         self._status_timer.start()
+        self.sorter = DesktopSorter(self)
+
+    # ----------------------------------------------------------- auto-sort
+    def _rule_box(self, path):
+        """First box whose rules match *path*, or None."""
+        name, is_dir = os.path.basename(path), os.path.isdir(path)
+        for b in self.boxes:
+            if b.rules and rules_match(b.rules, name, is_dir):
+                return b
+        return None
+
+    def _in_a_box(self, path):
+        key = os.path.normcase(os.path.normpath(path))
+        return any(
+            os.path.normcase(p) == key for b in self.boxes for p in b.items
+        )
+
+    def sort_item(self, path):
+        """Auto-sort one new Desktop item. False means "try again later"."""
+        if self._in_a_box(path):
+            return True
+        box = self._rule_box(path)
+        if box is None:
+            return True
+        box.add_paths([path], ask=False)
+        if box.move_files and os.path.exists(path):
+            return False  # in use or needs admin rights
+        log.info("Auto-sorted %s into box %s", path, box.uid)
+        return True
+
+    def sort_desktop(self, only=None):
+        """Apply the rules to everything on the Desktop now. Returns a count."""
+        groups = {}
+        for folder in desktop_folders():
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            for name in names:
+                path = os.path.join(folder, name)
+                if skip_for_sorting(path) or self._in_a_box(path):
+                    continue
+                box = self._rule_box(path)
+                if box is not None and (only is None or box is only):
+                    groups.setdefault(box, []).append(path)
+        moved = sum(b.add_paths(paths) for b, paths in groups.items())
+        QtWidgets.QMessageBox.information(
+            None, APP_NAME, f"Разложено по боксам: {moved}"
+        )
+        return moved
+
+    def placed_on_desktop(self, path):
+        sorter = getattr(self, "sorter", None)
+        if sorter is not None:
+            sorter.leave_alone(path)
 
     # ------------------------------------------------------------- screens
     def _watch_screen(self, scr):
@@ -1651,6 +1932,7 @@ class Manager(QtCore.QObject):
         m.addSeparator()
         m.addAction("Обновить иконки", self.refresh_icons)
         m.addAction("Открыть папку настроек", self.open_config_dir)
+        m.addAction("Разложить рабочий стол по правилам", lambda: self.sort_desktop())
         m.addAction("Восстановить файлы из хранилища…", self.recover_storage)
         a = m.addAction("Запускать с Windows")
         a.setCheckable(True)

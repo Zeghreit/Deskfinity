@@ -36,6 +36,7 @@ pythonw deskfinity.py
 | Move / resize | Drag the header / the edges (7 px hit zone) |
 | Scroll | Mouse wheel, when there are more icons than fit |
 | Settings | Right-click inside the box |
+| Auto-sort | Right-click → **Auto-sort rules…** |
 
 ## Moving vs. referencing
 
@@ -63,6 +64,27 @@ account on the machine.
 Deleting a box that holds files asks what to do with them — send them to the
 desktop, or leave them in storage.
 
+## Auto-sort rules
+
+Give a box name patterns and new things that land on your Desktop go into it
+by themselves — downloads, screenshots, saved attachments.
+
+- Patterns are separated by `;`: `*.pdf; *.docx; Screenshot*`. `*` and `?` are
+  wildcards, case doesn't matter. A trailing `/` matches folders instead of
+  files: `*/` is every folder, `Photos*/` only matching ones.
+- One-click presets: Documents, Images, Video, Music, Archives, Installers,
+  Shortcuts, Folders.
+- A new item is sorted once it has been quiet for a few seconds, so a running
+  download, a copy in progress or a rename you are typing is not snatched.
+  Temporary, hidden and system files (`*.crdownload`, `~$…`, `desktop.ini`) are
+  never touched. A file that is in use is retried a few times.
+- Only new items are sorted automatically. **Tray → Sort desktop by rules**
+  (or answering "yes" after editing rules) applies them to what is already
+  there, including the Public desktop.
+- If several boxes match, the first one wins. **Send to desktop** keeps an item
+  on the desktop — it is not sorted straight back.
+- A box with rules shows a small dot in its header; hover it to see them.
+
 ## Per-box settings (right-click)
 
 - Background colour
@@ -74,6 +96,7 @@ desktop, or leave them in storage.
 - Collapse to header
 - Lock — blocks moving and resizing
 - Remove broken links
+- Auto-sort rules
 
 ## How it works
 
@@ -133,7 +156,7 @@ python -m unittest discover -s tests
 
 They run headless (`QT_QPA_PLATFORM=offscreen`) on any OS and cover file
 moving, config rescue, resizing, single instance, HiDPI icons, background
-status checks and screen changes. The WinAPI parts (icon extraction, z-order,
+status checks, screen changes and auto-sort rules. The WinAPI parts (icon extraction, z-order,
 UAC retry) still need a manual check on Windows.
 
 ## License
@@ -178,6 +201,7 @@ pythonw deskfinity.py
 | Двигать / менять размер | Тянуть за заголовок / за края (7 px зона) |
 | Прокрутка | Колесо мыши, если иконок больше, чем влезает |
 | Настройки | ПКМ внутри бокса |
+| Автосортировка | ПКМ → **Правила автосортировки…** |
 
 ## Перенос против ссылок
 
@@ -204,6 +228,28 @@ pythonw deskfinity.py
 При удалении бокса с файлами внутри спрашивается, что с ними делать — вынести на
 стол или оставить в хранилище.
 
+## Правила автосортировки
+
+Задай боксу шаблоны имён, и новое на рабочем столе само будет в него
+попадать — загрузки, скриншоты, сохранённые вложения.
+
+- Шаблоны через `;`: `*.pdf; *.docx; Скриншот*`. `*` и `?` — подстановочные
+  знаки, регистр не важен. `/` в конце означает папки вместо файлов: `*/` — все
+  папки, `Фото*/` — только подходящие.
+- Готовые наборы в один клик: Документы, Картинки, Видео, Музыка, Архивы,
+  Установщики, Ярлыки, Папки.
+- Новый элемент сортируется, когда он несколько секунд не меняется, — идущая
+  загрузка, незаконченное копирование или переименование не перехватываются.
+  Временные, скрытые и системные файлы (`*.crdownload`, `~$…`, `desktop.ini`)
+  не трогаются никогда. Занятый файл пробуется ещё несколько раз.
+- Автоматически сортируется только новое. **Трей → Разложить рабочий стол по
+  правилам** (или «да» после правки правил) применяет их к тому, что уже лежит,
+  включая общий рабочий стол.
+- Если подходят несколько боксов, побеждает первый. **Вынести на рабочий стол**
+  оставляет элемент на столе — обратно он не уедет.
+- У бокса с правилами в заголовке маленькая точка; наведи на неё — увидишь
+  правила.
+
 ## Настройки бокса (ПКМ)
 
 - Цвет подложки
@@ -215,6 +261,7 @@ pythonw deskfinity.py
 - Свернуть в заголовок
 - Зафиксировать — блокирует перемещение и ресайз
 - Убрать битые ссылки
+- Правила автосортировки
 
 ## Как это работает
 

@@ -21,6 +21,8 @@ class FakeManager:
         pass
     def request_status(self):
         pass
+    def placed_on_desktop(self, path):
+        self.placed = path
 
 
 class Base(unittest.TestCase):
