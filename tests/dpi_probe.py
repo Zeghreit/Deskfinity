@@ -2,6 +2,7 @@ import os, sys, tempfile
 sys.dont_write_bytecode = True
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["APPDATA"] = tempfile.mkdtemp()
+os.environ["DESKFINITY_DATA"] = os.environ["APPDATA"]
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 import deskfinity as df

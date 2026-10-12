@@ -124,6 +124,11 @@ by themselves — downloads, screenshots, saved attachments.
 ## Data
 
 Config: `%APPDATA%\Deskfinity\boxes.json` — plain JSON, safe to edit by hand.
+
+**Portable mode:** create a `DeskfinityData` folder next to `deskfinity.py` or
+`Deskfinity.exe` (one level up also works, for an exe built into `dist\`) and
+everything below — config, storage, log — lives there instead of `%APPDATA%`.
+The `DESKFINITY_DATA` environment variable points it anywhere else.
 Files owned by boxes live in `%APPDATA%\Deskfinity\storage\`. The tray menu has
 an "open settings folder" entry.
 
@@ -293,6 +298,11 @@ pythonw deskfinity.py
 ## Данные
 
 Конфиг: `%APPDATA%\Deskfinity\boxes.json` — обычный JSON, можно править руками.
+
+**Портативный режим:** создай папку `DeskfinityData` рядом с `deskfinity.py` или
+`Deskfinity.exe` (можно на уровень выше — для exe, собранного в `dist\`), и всё
+описанное ниже — конфиг, хранилище, журнал — будет лежать там, а не в
+`%APPDATA%`. Переменная окружения `DESKFINITY_DATA` задаёт любое другое место.
 Файлы боксов лежат в `%APPDATA%\Deskfinity\storage\`. В трее есть пункт
 «Открыть папку настроек».
 

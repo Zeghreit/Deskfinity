@@ -40,9 +40,37 @@ from PyQt6.QtCore import Qt, QRect, QPoint, QSize
 IS_WINDOWS = sys.platform.startswith("win")
 
 APP_NAME = "Deskfinity"
-CONFIG_DIR = os.path.join(
-    os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME
-)
+PORTABLE_DIR = "DeskfinityData"
+
+
+def program_path():
+    """The running program: the .exe of a frozen build, else this script."""
+    if getattr(sys, "frozen", False):
+        return os.path.abspath(sys.executable)
+    return os.path.abspath(__file__)
+
+
+def data_dir():
+    """Where boxes.json, storage and the log live.
+
+    Portable mode: a DeskfinityData folder next to the program - or one level
+    up, for an .exe built into dist\\ - keeps everything there. Otherwise
+    %APPDATA%\\Deskfinity. The DESKFINITY_DATA variable overrides both.
+    """
+    env = os.environ.get("DESKFINITY_DATA")
+    if env:
+        return env
+    here = os.path.dirname(program_path())
+    for base in (here, os.path.dirname(here)):
+        candidate = os.path.join(base, PORTABLE_DIR)
+        if os.path.isdir(candidate):
+            return candidate
+    return os.path.join(
+        os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME
+    )
+
+
+CONFIG_DIR = data_dir()
 CONFIG_PATH = os.path.join(CONFIG_DIR, "boxes.json")
 STORE_DIR = os.path.join(CONFIG_DIR, "storage")
 
@@ -2268,10 +2296,13 @@ class Manager(QtCore.QObject):
         try:
             with self._run_key() as k:
                 if checked:
-                    exe = sys.executable
-                    if exe.lower().endswith("python.exe"):
-                        exe = exe[:-10] + "pythonw.exe"
-                    cmd = f'"{exe}" "{os.path.abspath(__file__)}"'
+                    if getattr(sys, "frozen", False):  # built .exe
+                        cmd = f'"{program_path()}"'
+                    else:
+                        exe = sys.executable
+                        if exe.lower().endswith("python.exe"):
+                            exe = exe[:-10] + "pythonw.exe"
+                        cmd = f'"{exe}" "{program_path()}"'
                     winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, cmd)
                 else:
                     winreg.DeleteValue(k, APP_NAME)

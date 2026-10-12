@@ -3,6 +3,8 @@ import os, sys, tempfile, shutil, unittest
 sys.dont_write_bytecode = True
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["APPDATA"] = tempfile.mkdtemp(prefix="df-appdata-")
+# never the real data folder, even next to a portable install
+os.environ["DESKFINITY_DATA"] = os.path.join(os.environ["APPDATA"], "Deskfinity")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 import deskfinity as df
