@@ -83,6 +83,8 @@ ITEMS_MIME = "application/x-deskfinity-items"  # drags between boxes
 HEADER_H = 26
 EDGE = 7          # resize hit zone
 MIN_W, MIN_H = 160, 110
+SNAP = 10         # px within which a moved box sticks to edges
+SNAP_GAP = 6      # gap kept between neighbouring boxes
 BACKUPS = 3       # boxes.json.bak1 .. bak3, taken at startup
 
 
@@ -1062,7 +1064,11 @@ class Box(QtWidgets.QWidget):
         pos = ev.position().toPoint()
 
         if self._mode == "move":
-            self.move(ev.globalPosition().toPoint() - self._press_pos)
+            pos = ev.globalPosition().toPoint() - self._press_pos
+            if not QtWidgets.QApplication.keyboardModifiers() & \
+                    Qt.KeyboardModifier.AltModifier:  # Alt: place freely
+                pos = self._snapped(pos)
+            self.move(pos)
             return
         if self._mode == "resize":
             self._do_resize(ev.globalPosition().toPoint())
@@ -1196,6 +1202,37 @@ class Box(QtWidgets.QWidget):
         else:
             self._expanded_h = g.height()
         self.setGeometry(g)
+
+    def _snapped(self, pos):
+        """*pos* nudged so edges stick to screen edges and nearby boxes."""
+        w, h = self.width(), self.height()
+        me = QRect(pos.x(), pos.y(), w, h)
+        # (our edge offset, target line) pairs, per axis
+        xs, ys = [], []
+        for a in screen_areas():
+            xs += [(0, a.left()), (w, a.right() + 1)]
+            ys += [(0, a.top()), (h, a.bottom() + 1)]
+        reach = SNAP + SNAP_GAP
+        for b in self.manager.boxes:
+            if b is self or not b.isVisible():
+                continue
+            g = b.geometry()
+            if not g.adjusted(-reach, -reach, reach, reach).intersects(me):
+                continue
+            xs += [(0, g.right() + 1 + SNAP_GAP), (w, g.left() - SNAP_GAP),
+                   (0, g.left()), (w, g.right() + 1)]
+            ys += [(0, g.bottom() + 1 + SNAP_GAP), (h, g.top() - SNAP_GAP),
+                   (0, g.top()), (h, g.bottom() + 1)]
+
+        def best(start, lines):
+            shift = None
+            for offset, line in lines:
+                d = line - (start + offset)
+                if abs(d) <= SNAP and (shift is None or abs(d) < abs(shift)):
+                    shift = d
+            return shift or 0
+
+        return QPoint(pos.x() + best(pos.x(), xs), pos.y() + best(pos.y(), ys))
 
     def fit_to_screens(self, areas):
         """Keep the header reachable when monitors are added or removed.

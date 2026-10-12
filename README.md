@@ -36,7 +36,7 @@ pythonw deskfinity.py
 | Select several | Ctrl+click / Shift+click, like in Explorer |
 | Move to another box | Drag onto it, or right-click → **Move to box** |
 | Take out | Drag onto the desktop or into an Explorer window |
-| Move / resize | Drag the header / the edges (7 px hit zone) |
+| Move / resize | Drag the header / the edges (7 px hit zone). Boxes snap to screen edges and to each other; hold **Alt** to place freely |
 | Scroll | Mouse wheel, when there are more icons than fit |
 | Settings | Right-click inside the box |
 | Auto-sort | Right-click → **Auto-sort rules…** |
@@ -211,7 +211,7 @@ pythonw deskfinity.py
 | Выделить несколько | Ctrl+клик / Shift+клик, как в проводнике |
 | Перенести в другой бокс | Перетащить на него или ПКМ → **Переместить в бокс** |
 | Вынуть | Перетащить на рабочий стол или в окно проводника |
-| Двигать / менять размер | Тянуть за заголовок / за края (7 px зона) |
+| Двигать / менять размер | Тянуть за заголовок / за края (7 px зона). Боксы прилипают к краям экрана и друг к другу; с **Alt** — свободно |
 | Прокрутка | Колесо мыши, если иконок больше, чем влезает |
 | Настройки | ПКМ внутри бокса |
 | Автосортировка | ПКМ → **Правила автосортировки…** |
