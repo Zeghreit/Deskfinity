@@ -950,6 +950,14 @@ class Box(QtWidgets.QWidget):
             p.setPen(self.label_color)
             self._draw_wrapped(p, lr, name, fm)
 
+        bar = self._scrollbar_rect()
+        if bar is not None:
+            c = QtGui.QColor(self.label_color)
+            c.setAlpha(90)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawRoundedRect(QtCore.QRectF(bar), 2, 2)
+
         if self._drop_at is not None:
             self._draw_insert_marker(p, self._drop_at)
 
@@ -960,6 +968,17 @@ class Box(QtWidgets.QWidget):
                 int(Qt.AlignmentFlag.AlignCenter),
                 "Перетащи сюда файлы\nили ярлыки",
             )
+
+    def _scrollbar_rect(self):
+        """Thin scroll position bar, or None when everything fits."""
+        max_scroll = self._content_h - self.height()
+        if self.collapsed or max_scroll <= 0:
+            return None
+        top, bottom = HEADER_H + 4, self.height() - 4
+        track = bottom - top
+        thumb = max(18, round(track * self.height() / self._content_h))
+        y = top + round((track - thumb) * self._scroll / max_scroll)
+        return QRect(self.width() - 6, y, 3, thumb)
 
     def _draw_wrapped(self, p, rect, text, fm):
         lines = []

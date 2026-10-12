@@ -71,7 +71,8 @@ class Screens(Base):
         b = m.boxes[0]
         self.assertTrue(df.header_visible(b.geometry(), df.screen_areas()))
         m._write()
-        self.assertEqual(json.load(open(df.CONFIG_PATH))["boxes"][0]["geometry"][:2], [5000, 50])
+        with open(df.CONFIG_PATH) as fh:
+            self.assertEqual(json.load(fh)["boxes"][0]["geometry"][:2], [5000, 50])
 
 
 if __name__ == "__main__":
