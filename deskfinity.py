@@ -389,6 +389,20 @@ def unique_target(folder, name):
         n += 1
 
 
+def _ps_literal(text):
+    """*text* as a PowerShell single-quoted string literal."""
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _elevation_command(script):
+    """PowerShell command that runs *script* elevated and waits for it."""
+    return (
+        "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden "
+        "-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass',"
+        "'-File',%s" % _ps_literal('"%s"' % script)
+    )
+
+
 def elevated_move(pairs, parent=None):
     """Move (src, dst) pairs with an admin prompt. Returns pairs that landed."""
     if not IS_WINDOWS or not pairs:
@@ -399,19 +413,14 @@ def elevated_move(pairs, parent=None):
         lines = ["$ErrorActionPreference = 'Continue'"]
         for src, dst in pairs:
             lines.append(
-                "try { Move-Item -LiteralPath '%s' -Destination '%s' -Force } "
-                "catch { }" % (src.replace("'", "''"), dst.replace("'", "''"))
+                "try { Move-Item -LiteralPath %s -Destination %s -Force } "
+                "catch { }" % (_ps_literal(src), _ps_literal(dst))
             )
         with open(script, "w", encoding="utf-8-sig") as fh:
             fh.write("\n".join(lines))
 
-        cmd = (
-            "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden "
-            "-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass',"
-            "'-File','\"%s\"'" % script
-        )
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", cmd],
+            ["powershell", "-NoProfile", "-Command", _elevation_command(script)],
             creationflags=0x08000000, timeout=180,
         )
     except Exception:
