@@ -33,6 +33,9 @@ pythonw deskfinity.py
 | Rename a box | Double-click the header |
 | Open an item | Double-click the icon |
 | Reorder icons | Drag inside the box (an insert marker appears) |
+| Select several | Ctrl+click / Shift+click, like in Explorer |
+| Move to another box | Drag onto it, or right-click → **Move to box** |
+| Take out | Drag onto the desktop or into an Explorer window |
 | Move / resize | Drag the header / the edges (7 px hit zone) |
 | Scroll | Mouse wheel, when there are more icons than fit |
 | Settings | Right-click inside the box |
@@ -53,7 +56,9 @@ links to it — dragging in `D:\Projects` will not relocate your project.
 - **Move originals into box** — retrofits entries that were added before the
   feature existed.
 - **Send to desktop** — the reverse: moves a stored file back onto the desktop
-  and drops it from the box.
+  and drops it from the box. Dragging it onto the desktop does the same.
+- Moving items to another box takes stored files along into that box's
+  storage; links stay links.
 - **Open box folder** — opens the storage folder in Explorer.
 
 Shortcuts living in `C:\Users\Public\Desktop` need administrator rights to move.
@@ -198,6 +203,9 @@ pythonw deskfinity.py
 | Переименовать бокс | Двойной клик по заголовку |
 | Открыть элемент | Двойной клик по иконке |
 | Переставить иконки | Перетащить внутри бокса (появляется маркер вставки) |
+| Выделить несколько | Ctrl+клик / Shift+клик, как в проводнике |
+| Перенести в другой бокс | Перетащить на него или ПКМ → **Переместить в бокс** |
+| Вынуть | Перетащить на рабочий стол или в окно проводника |
 | Двигать / менять размер | Тянуть за заголовок / за края (7 px зона) |
 | Прокрутка | Колесо мыши, если иконок больше, чем влезает |
 | Настройки | ПКМ внутри бокса |
@@ -218,7 +226,9 @@ pythonw deskfinity.py
 - **Перенести оригиналы в бокс** — дотягивает те элементы, которые добавлялись
   до появления этой логики.
 - **Вынести на рабочий стол** — обратная операция: файл возвращается на стол и
-  убирается из бокса.
+  убирается из бокса. Перетащить его на стол — то же самое.
+- При переносе в другой бокс файлы из хранилища переезжают в хранилище нового
+  бокса, ссылки остаются ссылками.
 - **Открыть папку бокса** — открывает хранилище в проводнике.
 
 Ярлыки из `C:\Users\Public\Desktop` требуют прав администратора. Deskfinity

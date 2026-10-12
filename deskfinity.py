@@ -50,6 +50,8 @@ LOG_PATH = os.path.join(CONFIG_DIR, "deskfinity.log")
 
 log = logging.getLogger(APP_NAME)
 
+ITEMS_MIME = "application/x-deskfinity-items"  # drags between boxes
+
 HEADER_H = 26
 EDGE = 7          # resize hit zone
 MIN_W, MIN_H = 160, 110
@@ -622,9 +624,12 @@ class Box(QtWidgets.QWidget):
         self._press_pos = QPoint()
         self._press_geo = QRect()
         self._hover_index = -1
-        self._drag_index = -1
+        self._drag_index = -1        # item under a press that may start a drag
         self._drag_pos = QPoint()
-        self._dragging_item = False
+        self._selected = set()       # selected item paths
+        self._anchor = -1            # index Shift+click extends from
+        self._collapse_to = None     # plain click inside a selection
+        self._drop_at = None         # insert marker while items hover here
         self._scroll = 0
         self._drop_hint = False
         self._home = None            # real spot while parked on a visible screen
@@ -884,10 +889,16 @@ class Box(QtWidgets.QWidget):
                 continue
             path_i = self.items[i]
 
-            if i == self._hover_index and not self._dragging_item:
+            selected = path_i in self._selected
+            if selected or i == self._hover_index:
                 hp = QtGui.QPainterPath()
                 hp.addRoundedRect(QtCore.QRectF(r.adjusted(2, 2, -2, -2)), 6, 6)
-                p.fillPath(hp, QtGui.QColor(255, 255, 255, 34))
+                p.fillPath(hp, QtGui.QColor(255, 255, 255, 64 if selected else 34))
+                if selected:
+                    p.save()
+                    p.setPen(QtGui.QPen(QtGui.QColor(120, 190, 255, 200), 1.2))
+                    p.drawPath(hp)
+                    p.restore()
 
             pm = ICONS.get(path_i, self.icon_size, dpr)
             pw = round(pm.width() / pm.devicePixelRatio())
@@ -911,9 +922,8 @@ class Box(QtWidgets.QWidget):
             p.setPen(self.label_color)
             self._draw_wrapped(p, lr, name, fm)
 
-        if self._dragging_item and 0 <= self._drag_index < len(self.items):
-            tgt = self._insert_index(self.mapFromGlobal(QtGui.QCursor.pos()))
-            self._draw_insert_marker(p, tgt)
+        if self._drop_at is not None:
+            self._draw_insert_marker(p, self._drop_at)
 
         if not self.items:
             p.setPen(QtGui.QColor(255, 255, 255, 110))
@@ -1010,11 +1020,10 @@ class Box(QtWidgets.QWidget):
         if self._mode == "resize":
             self._do_resize(ev.globalPosition().toPoint())
             return
-        if self._drag_index >= 0 and not self._dragging_item:
-            if (pos - self._drag_pos).manhattanLength() > 8:
-                self._dragging_item = True
-        if self._dragging_item:
-            self.update()
+        if self._drag_index >= 0:
+            if (pos - self._drag_pos).manhattanLength() >= \
+                    QtWidgets.QApplication.startDragDistance():
+                self._start_drag()
             return
 
         d = self._edge_at(pos)
@@ -1055,26 +1064,48 @@ class Box(QtWidgets.QWidget):
                 self._mode = "move"
             return
         idx = self._hit_item(pos)
+        self._select_at(idx, ev.modifiers())
         if idx >= 0 and not self.locked:
             self._drag_index = idx
             self._drag_pos = pos
 
+    def _select_at(self, idx, mods):
+        """Explorer-style selection: click, Ctrl+click, Shift+click."""
+        self.manager.clear_selection(keep=self)
+        self._collapse_to = None
+        if idx < 0:
+            self._selected.clear()
+        else:
+            path = self.items[idx]
+            if mods & Qt.KeyboardModifier.ControlModifier:
+                self._selected ^= {path}
+                self._anchor = idx
+            elif mods & Qt.KeyboardModifier.ShiftModifier and \
+                    0 <= self._anchor < len(self.items):
+                lo, hi = sorted((self._anchor, idx))
+                self._selected = set(self.items[lo:hi + 1])
+            elif path in self._selected:
+                self._collapse_to = path   # keep the group for a drag
+            else:
+                self._selected = {path}
+                self._anchor = idx
+        self.update()
+
+    def clear_selection(self):
+        if self._selected:
+            self._selected.clear()
+            self.update()
+
     def mouseReleaseEvent(self, ev):
-        if self._dragging_item and self._drag_index >= 0:
-            tgt = self._insert_index(ev.position().toPoint())
-            item = self.items.pop(self._drag_index)
-            if tgt > self._drag_index:
-                tgt -= 1
-            tgt = max(0, min(len(self.items), tgt))
-            self.items.insert(tgt, item)
-            self.manager.save()
-        elif self._mode in ("move", "resize"):
+        if self._mode in ("move", "resize"):
             self._home = None  # the user picked a new spot
             self.manager.save()
+        elif self._collapse_to is not None:  # a click, not a drag
+            self._selected = {self._collapse_to}
         self._mode = None
         self._resize_dir = ""
         self._drag_index = -1
-        self._dragging_item = False
+        self._collapse_to = None
         self.update()
 
     def mouseDoubleClickEvent(self, ev):
@@ -1146,29 +1177,201 @@ class Box(QtWidgets.QWidget):
                  self.uid, self._home.x(), self._home.y())
 
     # ------------------------------------------------------------ drag&drop
+    def selection(self):
+        """Selected paths in box order."""
+        return [p for p in self.items if p in self._selected]
+
+    def _make_mime(self, paths):
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(p) for p in paths])
+        mime.setData(
+            ITEMS_MIME,
+            json.dumps({"box": self.uid, "paths": paths}).encode("utf-8"),
+        )
+        return mime
+
+    def _drag_pixmap(self, paths):
+        pm = QtGui.QPixmap(
+            ICONS.get(paths[0], self.icon_size, self.devicePixelRatioF())
+        )
+        if len(paths) > 1:  # count badge
+            p = QtGui.QPainter(pm)
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            w = pm.width() / pm.devicePixelRatio()
+            badge = QtCore.QRectF(w - 20, 0, 20, 20)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(60, 130, 200))
+            p.drawEllipse(badge)
+            p.setPen(QtGui.QColor(255, 255, 255))
+            f = p.font()
+            f.setBold(True)
+            f.setPointSizeF(8)
+            p.setFont(f)
+            p.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), str(len(paths)))
+            p.end()
+        return pm
+
+    def _start_drag(self):
+        """Drag the selection: to another box, within this one, or out."""
+        idx, self._drag_index = self._drag_index, -1
+        self._collapse_to = None
+        if not 0 <= idx < len(self.items):
+            return
+        if self.items[idx] not in self._selected:
+            self._selected = {self.items[idx]}
+        paths = self.selection()
+        existed = [p for p in paths if os.path.exists(p)]
+        drag = QtGui.QDrag(self)
+        drag.setMimeData(self._make_mime(paths))
+        pm = self._drag_pixmap(paths)
+        drag.setPixmap(pm)
+        half = round(pm.width() / pm.devicePixelRatio() / 2)
+        drag.setHotSpot(QPoint(half, half))
+        self._exec_drag(drag)
+        for p in existed:
+            # if it went to the desktop, auto-sort must not bring it back
+            self.manager.placed_on_desktop(
+                os.path.join(desktop_dir(), os.path.basename(p)), hold_s=15
+            )
+        self._after_drag(existed)
+        # Explorer may finish a move after the drop has returned
+        for ms in (1500, 5000):
+            t = QtCore.QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(lambda e=existed: self._after_drag(e))
+            t.timeout.connect(t.deleteLater)
+            t.start(ms)
+
+    def _exec_drag(self, drag):
+        return drag.exec(
+            Qt.DropAction.MoveAction | Qt.DropAction.CopyAction
+            | Qt.DropAction.LinkAction,
+            Qt.DropAction.MoveAction,
+        )
+
+    def _after_drag(self, existed):
+        """Forget items another program (Explorer, the desktop) moved away."""
+        gone = [p for p in existed if p in self.items and not os.path.exists(p)]
+        for p in gone:
+            self.items.remove(p)
+            log.info("Dragged out of box %s: %s", self.uid, p)
+        self._selected &= set(self.items)
+        if gone:
+            self.manager.save()
+            self.manager.request_status()
+        self.update()
+
+    def _dragged_items(self, mime):
+        """(source box, paths) for a drag that started in a box, else None."""
+        if not mime.hasFormat(ITEMS_MIME):
+            return None
+        try:
+            info = json.loads(bytes(mime.data(ITEMS_MIME)).decode("utf-8"))
+            src = self.manager.box_by_uid(info["box"])
+            paths = [p for p in info["paths"] if isinstance(p, str)]
+        except Exception:
+            return None
+        return (src, paths) if src is not None else None
+
     def dragEnterEvent(self, ev):
-        if ev.mimeData().hasUrls():
+        md = ev.mimeData()
+        if md.hasUrls() or md.hasFormat(ITEMS_MIME):
             ev.acceptProposedAction()
             self._drop_hint = True
             self.update()
 
     def dragMoveEvent(self, ev):
-        if ev.mimeData().hasUrls():
+        md = ev.mimeData()
+        if md.hasFormat(ITEMS_MIME):
+            ev.setDropAction(Qt.DropAction.MoveAction)
+            ev.accept()
+            at = self._insert_index(ev.position().toPoint())
+            if at != self._drop_at:
+                self._drop_at = at
+                self.update()
+        elif md.hasUrls():
             ev.acceptProposedAction()
 
     def dragLeaveEvent(self, ev):
         self._drop_hint = False
+        self._drop_at = None
         self.update()
 
     def dropEvent(self, ev):
         self._drop_hint = False
-        paths = [
-            u.toLocalFile() for u in ev.mimeData().urls() if u.toLocalFile()
-        ]
-        if paths:
-            self.add_paths(paths)
-            ev.acceptProposedAction()
+        self._drop_at = None
+        at = None if self.collapsed else self._insert_index(ev.position().toPoint())
+        internal = self._dragged_items(ev.mimeData())
+        if internal is not None:
+            src, paths = internal
+            if src is self:
+                if at is not None:
+                    self.reorder(paths, at)
+            else:
+                self.take_from(src, paths, at)
+            ev.setDropAction(Qt.DropAction.MoveAction)
+            ev.accept()
+        else:
+            paths = [
+                u.toLocalFile() for u in ev.mimeData().urls() if u.toLocalFile()
+            ]
+            if paths:
+                self.add_paths(paths)
+                ev.acceptProposedAction()
         self.update()
+
+    def reorder(self, paths, at):
+        """Move *paths* (kept in their order) to insert position *at*."""
+        moving = set(paths)
+        block = [p for p in self.items if p in moving]
+        if not block:
+            return
+        before = sum(1 for p in self.items[:at] if p in moving)
+        rest = [p for p in self.items if p not in moving]
+        at = max(0, min(len(rest), at - before))
+        self.items = rest[:at] + block + rest[at:]
+        self.manager.save()
+        self.update()
+
+    def take_from(self, source, paths, at=None):
+        """Move *paths* from box *source* into this box. Returns the count.
+
+        Files stored by *source* move into this box's storage; links stay
+        links (a desktop item is moved in if this box moves files).
+        """
+        have = {p.lower() for p in self.items}
+        taken = []
+        for p in paths:
+            if p not in source.items:
+                continue
+            new = p
+            if source._in_store(p) and os.path.exists(p):
+                target = unique_target(self.store_dir(), os.path.basename(p))
+                try:
+                    shutil.move(p, target)
+                except Exception as e:
+                    log.warning("Could not move %s to box %s: %s", p, self.uid, e)
+                    continue
+                log.info("Moved %s -> %s", p, target)
+                new = target
+            else:
+                new, _ = self._ingest(p)   # needs admin rights: stays a link
+            source.items.remove(p)
+            if new.lower() not in have:
+                taken.append(new)
+                have.add(new.lower())
+        if at is None:
+            at = len(self.items)
+        at = max(0, min(len(self.items), at))
+        self.items[at:at] = taken
+        source._selected &= set(source.items)
+        self.manager.clear_selection(keep=self)
+        self._selected = set(taken)
+        source.update()
+        self.update()
+        self.manager.save()
+        self.manager.request_status()
+        return len(taken)
 
     # ------------------------------------------------------------- actions
     def open_item(self, idx):
@@ -1279,15 +1482,26 @@ class Box(QtWidgets.QWidget):
         m = QtWidgets.QMenu(self)
 
         if idx >= 0:
-            m.addAction("Открыть", lambda: self.open_item(idx))
-            m.addAction(
-                "Показать в проводнике",
-                lambda: self._reveal(self.items[idx]),
-            )
+            if self.items[idx] not in self._selected:
+                self._select_at(idx, Qt.KeyboardModifier.NoModifier)
+            paths = self.selection()
+            n = f" ({len(paths)})" if len(paths) > 1 else ""
+            m.addAction("Открыть" + n, lambda: self.open_paths(paths))
+            if len(paths) == 1:
+                m.addAction(
+                    "Показать в проводнике", lambda: self._reveal(paths[0])
+                )
             m.addSeparator()
             m.addAction(
-                "Вынести на рабочий стол", lambda: self._remove(idx)
+                "Вынести на рабочий стол" + n, lambda: self._remove_paths(paths)
             )
+            others = [b for b in self.manager.boxes if b is not self]
+            if others:
+                move_menu = m.addMenu("Переместить в бокс" + n)
+                for b in others:
+                    move_menu.addAction(
+                        b.title, lambda _=False, t=b: t.take_from(self, paths)
+                    )
             m.addSeparator()
 
         m.addAction("Переименовать группу…", self.rename)
@@ -1365,16 +1579,32 @@ class Box(QtWidgets.QWidget):
         self.manager.save()
 
     def _remove(self, idx):
-        if not self._eject(self.items[idx]):
-            QtWidgets.QMessageBox.warning(
-                self, APP_NAME,
-                "Не удалось вынести файл на рабочий стол — он занят или нет "
-                "прав. Элемент оставлен в боксе.",
-            )
-            return
-        del self.items[idx]
+        self._remove_paths([self.items[idx]])
+
+    def _remove_paths(self, paths):
+        """Send items back to the desktop and drop them from the box."""
+        failed = []
+        for p in paths:
+            if p not in self.items:
+                continue
+            if self._eject(p):
+                self.items.remove(p)
+            else:
+                failed.append(p)
+        self._selected &= set(self.items)
         self.update()
         self.manager.save()
+        if failed:
+            QtWidgets.QMessageBox.warning(
+                self, APP_NAME,
+                f"Не удалось вынести на рабочий стол: {len(failed)} — файл "
+                "занят или нет прав. Эти элементы оставлены в боксе.",
+            )
+
+    def open_paths(self, paths):
+        for p in paths:
+            if p in self.items:
+                self.open_item(self.items.index(p))
 
     def _reveal(self, path):
         if IS_WINDOWS and os.path.exists(path):
@@ -1588,6 +1818,7 @@ class DesktopSorter(QtCore.QObject):
         self.manager = manager
         self.folder = desktop_dir()
         self._seen = self._listing()
+        self._hold = {}                # name -> time until it is left alone
         self._tries = {}
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
@@ -1604,15 +1835,24 @@ class DesktopSorter(QtCore.QObject):
         except OSError:
             return set()
 
-    def leave_alone(self, path):
-        """*path* was put on the Desktop on purpose - do not sort it."""
+    def leave_alone(self, path, hold_s=0):
+        """*path* was put on the Desktop on purpose - do not sort it.
+
+        hold_s also covers an item that only lands there a bit later (a drag
+        to the desktop that Explorer finishes after the drop).
+        """
         if os.path.normcase(os.path.dirname(path)) == os.path.normcase(self.folder):
-            self._seen.add(os.path.basename(path))
+            name = os.path.basename(path)
+            self._seen.add(name)
+            if hold_s:
+                self._hold[name] = time.time() + hold_s
 
     def scan(self):
         names = self._listing()
-        self._seen &= names            # forget items that left the Desktop
         again, now = False, time.time()
+        self._hold = {n: t for n, t in self._hold.items() if t > now}
+        self._seen &= names            # forget items that left the Desktop
+        self._seen |= names & self._hold.keys()
         for name in sorted(names - self._seen):
             path = os.path.join(self.folder, name)
             if skip_for_sorting(path):
@@ -1792,10 +2032,19 @@ class Manager(QtCore.QObject):
         )
         return moved
 
-    def placed_on_desktop(self, path):
+    def box_by_uid(self, uid):
+        return next((b for b in self.boxes if b.uid == uid), None)
+
+    def clear_selection(self, keep=None):
+        """One selection at a time: clear it in every box but *keep*."""
+        for b in self.boxes:
+            if b is not keep:
+                b.clear_selection()
+
+    def placed_on_desktop(self, path, hold_s=0):
         sorter = getattr(self, "sorter", None)
         if sorter is not None:
-            sorter.leave_alone(path)
+            sorter.leave_alone(path, hold_s)
 
     # ------------------------------------------------------------- screens
     def _watch_screen(self, scr):

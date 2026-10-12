@@ -21,8 +21,11 @@ class FakeManager:
         pass
     def request_status(self):
         pass
-    def placed_on_desktop(self, path):
+    def placed_on_desktop(self, path, hold_s=0):
         self.placed = path
+    def clear_selection(self, keep=None):
+        pass
+    boxes = ()
 
 
 class Base(unittest.TestCase):
