@@ -14,6 +14,11 @@ APP = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 df.ICONS = df.IconCache()
 
 
+def load_json(path):
+    with open(path, encoding="utf-8") as fh:
+        return __import__("json").load(fh)
+
+
 class FakeManager:
     def __init__(self):
         self.saves = 0

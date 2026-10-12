@@ -1,5 +1,5 @@
 import json, os, time, unittest
-from harness import df, Base, APP
+from harness import df, Base, APP, load_json
 
 
 class Rules(unittest.TestCase):
@@ -164,7 +164,7 @@ class AutoSort(Base):
     def test_rules_persist(self):
         m = self.standard()
         m._write()
-        saved = json.load(open(df.CONFIG_PATH))["boxes"]
+        saved = load_json(df.CONFIG_PATH)["boxes"]
         self.assertEqual(saved[1]["rules"], ["*.png", "Фото*/"])
         self.assertEqual(saved[2]["rules"], [])
 

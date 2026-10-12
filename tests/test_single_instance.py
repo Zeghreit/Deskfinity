@@ -47,7 +47,7 @@ class SingleInstance(Base):
         if p.poll() is None:
             p.kill()
             self.fail("second instance did not exit")
-        out = p.stdout.read()
+        out = p.communicate()[0]
         self.assertEqual(p.returncode, 0, out)
         self.assertIn("second-exited", out)
         self.assertIn("Already running", out)

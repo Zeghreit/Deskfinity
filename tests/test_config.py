@@ -1,5 +1,5 @@
 import glob, json, os, unittest
-from harness import df, Base, APP
+from harness import df, Base, APP, load_json
 
 
 def box(uid, title="B", **kw):
@@ -75,7 +75,7 @@ class ConfigSafety(Base):
             self.manager()  # identical restart: no extra rotation
         baks = sorted(glob.glob(df.CONFIG_PATH + ".bak*"))
         self.assertEqual([os.path.basename(b)[-4:] for b in baks], ["bak1", "bak2", "bak3"])
-        uids = [json.load(open(b))["boxes"][0]["uid"] for b in baks]
+        uids = [load_json(b)["boxes"][0]["uid"] for b in baks]
         self.assertEqual(uids, ["v4", "v3", "v2"])
 
     def test_recover_orphaned_storage(self):

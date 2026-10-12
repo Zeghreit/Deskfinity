@@ -1,7 +1,7 @@
 import unittest
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
-from harness import df, Base, APP
+from harness import df, Base, APP, load_json
 
 
 class AlphaSaved(Base):
@@ -19,8 +19,7 @@ class AlphaSaved(Base):
         self.assertTrue(m._save_timer.isActive())
         m._save_timer.stop()
         m._write()
-        import json
-        saved = json.load(open(df.CONFIG_PATH))["boxes"][0]["alpha"]
+        saved = load_json(df.CONFIG_PATH)["boxes"][0]["alpha"]
         self.assertEqual(saved, slider.value())
         self.assertNotEqual(saved, 140)
 

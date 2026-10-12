@@ -1,7 +1,7 @@
 import json, os, shutil, unittest
 from PyQt6 import QtCore, QtGui
 from PyQt6.QtCore import Qt, QPointF
-from harness import df, Base, APP
+from harness import df, Base, APP, load_json
 
 NONE = Qt.KeyboardModifier.NoModifier
 CTRL = Qt.KeyboardModifier.ControlModifier
@@ -142,7 +142,7 @@ class Drag(Base):
         self.assertFalse(os.path.exists(s))
         self.assertEqual(b.selection(), b.items)
         m._write()
-        saved = json.load(open(df.CONFIG_PATH))["boxes"]
+        saved = load_json(df.CONFIG_PATH)["boxes"]
         self.assertEqual(len(saved[0]["items"]) + len(saved[1]["items"]), 3)
 
     def test_drop_at_position(self):
