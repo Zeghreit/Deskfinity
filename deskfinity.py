@@ -772,7 +772,7 @@ class Box(QtWidgets.QWidget):
             ph = round(pm.height() / pm.devicePixelRatio())
             ix = r.x() + (r.width() - pw) // 2
             iy = r.y() + 5 + (self.icon_size - ph) // 2
-            exists = STATUS.get(path_i, (None, False))[0]
+            exists, is_dir = STATUS.get(path_i, (None, False))
             if exists is None:
                 self.manager.request_status()
             elif not exists:
@@ -780,7 +780,9 @@ class Box(QtWidgets.QWidget):
             p.drawPixmap(ix, iy, pm)
             p.setOpacity(1.0)
 
-            name = os.path.splitext(os.path.basename(path_i))[0] or path_i
+            base = os.path.basename(path_i)
+            # hide file extensions like Explorer does, but keep "my.project"
+            name = (base if is_dir else os.path.splitext(base)[0]) or path_i
             lr = QRect(r.x() + 2, r.y() + self.icon_size + 8, r.width() - 4, 28)
             p.setPen(QtGui.QColor(0, 0, 0, 130))
             self._draw_wrapped(p, lr.translated(0, 1), name, fm)
