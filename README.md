@@ -13,6 +13,15 @@ replacement.
 
 ## Install
 
+**Ready-made exe:** download `Deskfinity.exe` from the
+[Releases](https://github.com/Zeghreit/Deskfinity/releases) page — no Python
+needed. Every push also builds one, under
+[Actions](https://github.com/Zeghreit/Deskfinity/actions) → the run →
+*Artifacts*. To keep the data next to the exe, create a `DeskfinityData`
+folder beside it (see *Portable mode* below).
+
+**From source:**
+
 1. Put `deskfinity.py` and `Deskfinity.bat` in the same folder.
 2. Run `Deskfinity.bat`. It installs PyQt6 if missing and starts the app with
    `pythonw` (no console window).
@@ -191,6 +200,14 @@ MIT — see [LICENSE](LICENSE).
 оболочки.
 
 ## Установка
+
+**Готовый exe:** скачай `Deskfinity.exe` со страницы
+[Releases](https://github.com/Zeghreit/Deskfinity/releases) — Python не нужен.
+Каждый push тоже собирает exe: [Actions](https://github.com/Zeghreit/Deskfinity/actions)
+→ нужный запуск → *Artifacts*. Чтобы данные лежали рядом с exe, создай рядом
+папку `DeskfinityData` (см. *Портативный режим* ниже).
+
+**Из исходников:**
 
 1. Положи `deskfinity.py` и `Deskfinity.bat` в одну папку.
 2. Запусти `Deskfinity.bat` — он поставит PyQt6, если его нет, и стартанёт

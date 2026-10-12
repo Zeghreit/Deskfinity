@@ -15,8 +15,8 @@ jobs:
     name: Tests (headless)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Qt runtime libraries
@@ -32,8 +32,8 @@ jobs:
     needs: tests
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install PyQt6 pyinstaller
@@ -53,8 +53,11 @@ jobs:
           if (Test-Path $log) { Get-Content $log }
           if ($p.HasExited) { throw "Deskfinity.exe exited early (code $($p.ExitCode))" }
           if (-not (Select-String -Path $log -Pattern "Starting Deskfinity" -Quiet)) { throw "no start-up line in the log" }
-          Stop-Process -Id $p.Id
-      - uses: actions/upload-artifact@v4
+          # a one-file build runs the app in a child process: stop it by PID too
+          Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          Stop-Process -Id $p.Id -Force
+      - uses: actions/upload-artifact@v5
         with:
           name: Deskfinity-exe
           path: dist/Deskfinity.exe
