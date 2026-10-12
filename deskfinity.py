@@ -83,6 +83,7 @@ ITEMS_MIME = "application/x-deskfinity-items"  # drags between boxes
 HEADER_H = 26
 EDGE = 7          # resize hit zone
 MIN_W, MIN_H = 160, 110
+PEEK_DELAY_MS = 350   # hover time before a collapsed box rolls open
 SNAP = 10         # px within which a moved box sticks to edges
 SNAP_GAP = 6      # gap kept between neighbouring boxes
 BACKUPS = 3       # boxes.json.bak1 .. bak3, taken at startup
@@ -663,6 +664,11 @@ class Box(QtWidgets.QWidget):
         self._scroll = 0
         self._drop_hint = False
         self._home = None            # real spot while parked on a visible screen
+        self._peek = False           # collapsed box shown open while hovered
+        self._peek_timer = QtCore.QTimer(self)
+        self._peek_timer.setSingleShot(True)
+        self._peek_timer.setInterval(PEEK_DELAY_MS)
+        self._peek_timer.timeout.connect(self._peek_due)
 
         self._rects = []
         self._cols = 1
@@ -903,7 +909,7 @@ class Box(QtWidgets.QWidget):
             fm.elidedText(self.title, Qt.TextElideMode.ElideRight, tr.width()),
         )
 
-        if self.collapsed:
+        if self.shut:
             return
 
         # items
@@ -974,7 +980,7 @@ class Box(QtWidgets.QWidget):
     def _scrollbar_rect(self):
         """Thin scroll position bar, or None when everything fits."""
         max_scroll = self._content_h - self.height()
-        if self.collapsed or max_scroll <= 0:
+        if self.shut or max_scroll <= 0:
             return None
         top, bottom = HEADER_H + 4, self.height() - 4
         track = bottom - top
@@ -1049,7 +1055,7 @@ class Box(QtWidgets.QWidget):
         if self.locked:
             return ""
         d = ""
-        if not self.collapsed:  # a collapsed box is all header: width only
+        if not self.shut:  # a collapsed box is all header: width only
             if pos.y() <= EDGE:
                 d += "t"
             elif pos.y() >= self.height() - EDGE:
@@ -1171,7 +1177,7 @@ class Box(QtWidgets.QWidget):
             self.open_item(idx)
 
     def wheelEvent(self, ev):
-        if self.collapsed:
+        if self.shut:
             return
         max_scroll = max(0, self._content_h - self.height())
         if max_scroll <= 0:
@@ -1181,9 +1187,38 @@ class Box(QtWidgets.QWidget):
         )
         self.update()
 
+    def enterEvent(self, ev):
+        if self.collapsed and not self._peek:
+            self._peek_timer.start()
+
     def leaveEvent(self, ev):
         self._hover_index = -1
+        self._peek_timer.stop()
+        self._close_peek()
         self.update()
+
+    # ------------------------------------------------- peek (roll-down)
+    @property
+    def shut(self):
+        """Collapsed and not rolled open by a hover right now."""
+        return self.collapsed and not self._peek
+
+    def _peek_due(self):
+        if self.underMouse():
+            self._open_peek()
+
+    def _open_peek(self):
+        if self.collapsed and not self._peek:
+            self._peek = True
+            self.resize(self.width(), self._expanded_h)
+            self.update()
+
+    def _close_peek(self):
+        if self._peek:
+            self._peek = False
+            if self.collapsed:
+                self.resize(self.width(), HEADER_H)
+            self.update()
 
     def _do_resize(self, gpos):
         delta = gpos - self._press_pos
@@ -1197,7 +1232,7 @@ class Box(QtWidgets.QWidget):
             g.setTop(min(g.top() + delta.y(), g.bottom() - MIN_H + 1))
         if "b" in self._resize_dir:
             g.setBottom(max(g.bottom() + delta.y(), g.top() + MIN_H - 1))
-        if self.collapsed:
+        if self.shut:
             g.setHeight(HEADER_H)
         else:
             self._expanded_h = g.height()
@@ -1362,6 +1397,7 @@ class Box(QtWidgets.QWidget):
         if md.hasUrls() or md.hasFormat(ITEMS_MIME):
             ev.acceptProposedAction()
             self._drop_hint = True
+            self._open_peek()
             self.update()
 
     def dragMoveEvent(self, ev):
@@ -1379,12 +1415,13 @@ class Box(QtWidgets.QWidget):
     def dragLeaveEvent(self, ev):
         self._drop_hint = False
         self._drop_at = None
+        self._close_peek()
         self.update()
 
     def dropEvent(self, ev):
         self._drop_hint = False
         self._drop_at = None
-        at = None if self.collapsed else self._insert_index(ev.position().toPoint())
+        at = None if self.shut else self._insert_index(ev.position().toPoint())
         internal = self._dragged_items(ev.mimeData())
         if internal is not None:
             src, paths = internal
@@ -1507,8 +1544,10 @@ class Box(QtWidgets.QWidget):
         self.manager.save()
 
     def toggle_collapse(self):
+        self._peek_timer.stop()
         if self.collapsed:
             self.collapsed = False
+            self._peek = False
             self.resize(self.width(), self._expanded_h)
         else:
             self._expanded_h = self.height()

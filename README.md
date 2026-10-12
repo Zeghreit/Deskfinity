@@ -98,7 +98,8 @@ by themselves — downloads, screenshots, saved attachments.
 - Icon size — 32 / 40 / 48 / 64 / 80 / 96 px
 - Corner radius — 0 / 6 / 10 / 16 / 24
 - Sort by name or by type
-- Collapse to header
+- Collapse to header — a collapsed box rolls open while you hover it (or drag
+  files over it) and rolls back up when the mouse leaves
 - Lock — blocks moving and resizing
 - Remove broken links
 - Auto-sort rules
@@ -273,7 +274,8 @@ pythonw deskfinity.py
 - Размер иконок — 32 / 40 / 48 / 64 / 80 / 96 px
 - Скругление углов — 0 / 6 / 10 / 16 / 24
 - Сортировка по имени или по типу
-- Свернуть в заголовок
+- Свернуть в заголовок — свёрнутый бокс раскрывается, пока над ним мышь (или
+  над ним тащат файлы), и сворачивается обратно, когда она уходит
 - Зафиксировать — блокирует перемещение и ресайз
 - Убрать битые ссылки
 - Правила автосортировки
