@@ -28,7 +28,7 @@ pythonw deskfinity.py
 
 | Action | How |
 |---|---|
-| Create a box | Click the tray icon, or **Ctrl+Alt+F**, then drag out an area |
+| Create a box | Click the tray icon, or **Ctrl+Alt+F** (change it: tray → **Hotkey…**), then drag out an area |
 | Add shortcuts | Drag files/folders from Explorer into the box |
 | Rename a box | Double-click the header |
 | Open an item | Double-click the icon |
@@ -204,7 +204,7 @@ pythonw deskfinity.py
 
 | Действие | Как |
 |---|---|
-| Создать бокс | Клик по иконке в трее, или **Ctrl+Alt+F** → обвести область |
+| Создать бокс | Клик по иконке в трее, или **Ctrl+Alt+F** (сменить: трей → **Сочетание клавиш…**) → обвести область |
 | Добавить ярлыки | Перетащить файлы/папки из проводника в бокс |
 | Переименовать бокс | Двойной клик по заголовку |
 | Открыть элемент | Двойной клик по иконке |

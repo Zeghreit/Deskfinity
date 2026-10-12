@@ -83,6 +83,7 @@ ITEMS_MIME = "application/x-deskfinity-items"  # drags between boxes
 HEADER_H = 26
 EDGE = 7          # resize hit zone
 MIN_W, MIN_H = 160, 110
+DEFAULT_HOTKEY = "Ctrl+Alt+F"
 PEEK_DELAY_MS = 350   # hover time before a collapsed box rolls open
 SNAP = 10         # px within which a moved box sticks to edges
 SNAP_GAP = 6      # gap kept between neighbouring boxes
@@ -2003,6 +2004,89 @@ class DesktopSorter(QtCore.QObject):
 
 
 # --------------------------------------------------------------------------- #
+#  Global hotkey
+# --------------------------------------------------------------------------- #
+_VK_SPECIAL = {
+    Qt.Key.Key_Space: 0x20, Qt.Key.Key_PageUp: 0x21, Qt.Key.Key_PageDown: 0x22,
+    Qt.Key.Key_End: 0x23, Qt.Key.Key_Home: 0x24, Qt.Key.Key_Left: 0x25,
+    Qt.Key.Key_Up: 0x26, Qt.Key.Key_Right: 0x27, Qt.Key.Key_Down: 0x28,
+    Qt.Key.Key_Print: 0x2C, Qt.Key.Key_Insert: 0x2D, Qt.Key.Key_Delete: 0x2E,
+    Qt.Key.Key_Pause: 0x13, Qt.Key.Key_Backspace: 0x08, Qt.Key.Key_Tab: 0x09,
+    Qt.Key.Key_Return: 0x0D, Qt.Key.Key_Enter: 0x0D,
+}
+
+
+def hotkey_to_win(text):
+    """(modifiers, virtual-key) for RegisterHotKey, or None if unusable.
+
+    Takes the first chord of a Qt portable key string ("Ctrl+Alt+F") and
+    insists on at least one modifier, so plain typing is never swallowed.
+    """
+    seq = QtGui.QKeySequence.fromString(
+        text or "", QtGui.QKeySequence.SequenceFormat.PortableText
+    )
+    if seq.isEmpty():
+        return None
+    combo = seq[0]
+    mods, key = combo.keyboardModifiers(), combo.key()
+    win = 0
+    if mods & Qt.KeyboardModifier.AltModifier:
+        win |= 0x1   # MOD_ALT
+    if mods & Qt.KeyboardModifier.ControlModifier:
+        win |= 0x2   # MOD_CONTROL
+    if mods & Qt.KeyboardModifier.ShiftModifier:
+        win |= 0x4   # MOD_SHIFT
+    if mods & Qt.KeyboardModifier.MetaModifier:
+        win |= 0x8   # MOD_WIN
+    k = key.value if hasattr(key, "value") else int(key)
+    if 0x30 <= k <= 0x39 or 0x41 <= k <= 0x5A:   # digits, A-Z: same codes
+        vk = k
+    elif Qt.Key.Key_F1.value <= k <= Qt.Key.Key_F24.value:
+        vk = 0x70 + k - Qt.Key.Key_F1.value     # VK_F1..VK_F24
+    else:
+        vk = _VK_SPECIAL.get(key)
+    if not win or not vk:
+        return None
+    return win, vk
+
+
+class HotkeyDialog(QtWidgets.QDialog):
+
+    def __init__(self, current, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Сочетание клавиш")
+        lay = QtWidgets.QVBoxLayout(self)
+        hint = QtWidgets.QLabel(
+            "Нажми сочетание для создания новой группы.\n"
+            "Нужен хотя бы один из Ctrl, Alt, Shift или Win."
+        )
+        lay.addWidget(hint)
+        self.edit = QtWidgets.QKeySequenceEdit(QtGui.QKeySequence(current))
+        lay.addWidget(self.edit)
+        reset = QtWidgets.QPushButton(f"По умолчанию ({DEFAULT_HOTKEY})")
+        reset.clicked.connect(
+            lambda: self.edit.setKeySequence(QtGui.QKeySequence(DEFAULT_HOTKEY))
+        )
+        lay.addWidget(reset)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def text(self):
+        """First chord of the entered sequence, in portable form."""
+        seq = self.edit.keySequence()
+        if seq.isEmpty():
+            return ""
+        return QtGui.QKeySequence(seq[0]).toString(
+            QtGui.QKeySequence.SequenceFormat.PortableText
+        )
+
+
+# --------------------------------------------------------------------------- #
 #  Single instance
 # --------------------------------------------------------------------------- #
 _INSTANCE_MUTEX = None  # held for the lifetime of the process
@@ -2071,6 +2155,8 @@ class Manager(QtCore.QObject):
         super().__init__()
         self.app = app
         self.boxes = []
+        self.settings = {}        # global options saved in boxes.json
+        self._hotkey_filter = None
         self._unloaded = []       # raw entries that failed to load - kept as is
         self.load_notice = None   # set when the config needed rescuing
         self._overlay = None
@@ -2098,9 +2184,9 @@ class Manager(QtCore.QObject):
             self._watch_screen(scr)
 
         self._listen_for_instances()
+        self.load()                 # settings first: they pick the hotkey
         self.hotkey_ok = self._install_hotkey()
         self._build_tray()
-        self.load()
         self.fit_boxes()
         self.request_status()
         self._status_timer.start()
@@ -2237,22 +2323,28 @@ class Manager(QtCore.QObject):
         )
 
     # ------------------------------------------------------------- hotkey
+    def hotkey_text(self):
+        return self.settings.get("hotkey") or DEFAULT_HOTKEY
+
     def _install_hotkey(self):
-        """Global Ctrl+Alt+F -> start drawing a new box. True on success."""
-        self._hotkey_filter = None
+        """(Re-)register the global hotkey that starts a new box. True on success."""
         if not IS_WINDOWS:
             return False
-        MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
-        VK_F = 0x46
-        ok = user32.RegisterHotKey(
-            None, 1, MOD_ALT | MOD_CONTROL | MOD_NOREPEAT, VK_F
-        )
+        user32.UnregisterHotKey(None, 1)  # harmless when nothing is registered
+        parsed = hotkey_to_win(self.hotkey_text())
+        if parsed is None:
+            log.warning("Unusable hotkey %r", self.hotkey_text())
+            return False
+        MOD_NOREPEAT = 0x4000
+        ok = user32.RegisterHotKey(None, 1, parsed[0] | MOD_NOREPEAT, parsed[1])
         if not ok:
             log.warning(
-                "Ctrl+Alt+F is already taken by another program (error %d)",
-                ctypes.get_last_error(),
+                "%s is already taken by another program (error %d)",
+                self.hotkey_text(), ctypes.get_last_error(),
             )
             return False
+        if self._hotkey_filter is not None:
+            return True
 
         manager = self
 
@@ -2294,10 +2386,8 @@ class Manager(QtCore.QObject):
         self.tray = QtWidgets.QSystemTrayIcon(self._tray_icon())
         self.tray.setToolTip(APP_NAME)
         m = QtWidgets.QMenu()
-        m.addAction(
-            "Новая группа (Ctrl+Alt+F)" if self.hotkey_ok else "Новая группа",
-            self.begin_draw,
-        )
+        self._new_action = m.addAction("", self.begin_draw)
+        self._update_tray_labels()
         m.addSeparator()
         m.addAction("Показать все", self.show_all)
         m.addAction("Скрыть все", self.hide_all)
@@ -2306,6 +2396,7 @@ class Manager(QtCore.QObject):
         m.addAction("Открыть папку настроек", self.open_config_dir)
         m.addAction("Разложить рабочий стол по правилам", lambda: self.sort_desktop())
         m.addAction("Восстановить файлы из хранилища…", self.recover_storage)
+        m.addAction("Сочетание клавиш…", self.edit_hotkey)
         a = m.addAction("Запускать с Windows")
         a.setCheckable(True)
         a.setChecked(self._autostart_enabled())
@@ -2315,6 +2406,45 @@ class Manager(QtCore.QObject):
         self.tray.setContextMenu(m)
         self.tray.activated.connect(self._tray_click)
         self.tray.show()
+
+    def _update_tray_labels(self):
+        label = "Новая группа"
+        if self.hotkey_ok:
+            label += f" ({self.hotkey_text()})"
+        self._new_action.setText(label)
+
+    def set_hotkey(self, text):
+        """Switch the global hotkey. False (old one kept) if unusable or taken."""
+        if hotkey_to_win(text) is None:
+            return False
+        old = self.hotkey_text()
+        self.settings["hotkey"] = text
+        if IS_WINDOWS and not self._install_hotkey():
+            self.settings["hotkey"] = old
+            self.hotkey_ok = self._install_hotkey()
+            return False
+        self.hotkey_ok = IS_WINDOWS
+        self._update_tray_labels()
+        self.save()
+        return True
+
+    def edit_hotkey(self):
+        dlg = HotkeyDialog(self.hotkey_text())
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        text = dlg.text()
+        if hotkey_to_win(text) is None:
+            QtWidgets.QMessageBox.warning(
+                None, APP_NAME,
+                "Это сочетание не подходит: нужна обычная клавиша вместе с "
+                "Ctrl, Alt, Shift или Win.",
+            )
+        elif not self.set_hotkey(text):
+            QtWidgets.QMessageBox.warning(
+                None, APP_NAME,
+                f"{text} уже занято другой программой. "
+                f"Оставлено {self.hotkey_text()}.",
+            )
 
     def _tray_click(self, reason):
         if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
@@ -2412,7 +2542,7 @@ class Manager(QtCore.QObject):
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             boxes = [f.to_dict() for f in self.boxes] + self._unloaded
-            data = {"version": 1, "boxes": boxes}
+            data = {"version": 1, "settings": self.settings, "boxes": boxes}
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
@@ -2421,14 +2551,15 @@ class Manager(QtCore.QObject):
             log.exception("Could not save %s", CONFIG_PATH)
 
     @staticmethod
-    def _read_entries(path):
-        """Box entries from a config file. Raises if the file is unusable."""
+    def _read_config(path):
+        """(box entries, settings) from a config file. Raises if unusable."""
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         entries = data.get("boxes", data.get("fences", []))
         if not isinstance(entries, list):
             raise ValueError("'boxes' is not a list")
-        return entries
+        settings = data.get("settings")
+        return entries, settings if isinstance(settings, dict) else {}
 
     def _backup(self):
         """Rotate boxes.json.bak1..N, skipping copies identical to the last."""
@@ -2464,7 +2595,7 @@ class Manager(QtCore.QObject):
                 return
         restored = False
         try:
-            entries = self._read_entries(path)
+            entries, self.settings = self._read_config(path)
             if path == CONFIG_PATH:
                 self._backup()
         except Exception:
@@ -2474,7 +2605,7 @@ class Manager(QtCore.QObject):
             for i in range(1, BACKUPS + 1):
                 bak = f"{CONFIG_PATH}.bak{i}"
                 try:
-                    entries = self._read_entries(bak)
+                    entries, self.settings = self._read_config(bak)
                 except Exception:
                     continue
                 log.warning("Restored the layout from %s", bak)
@@ -2618,8 +2749,9 @@ def main():
     elif IS_WINDOWS and not mgr.hotkey_ok:
         mgr.tray.showMessage(
             APP_NAME,
-            "Сочетание Ctrl+Alt+F занято другой программой. "
-            "Новую группу можно создать кликом по иконке в трее.",
+            f"Сочетание {mgr.hotkey_text()} занято другой программой. "
+            "Новую группу можно создать кликом по иконке в трее "
+            "или выбрать другое сочетание там же.",
             QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
             8000,
         )
