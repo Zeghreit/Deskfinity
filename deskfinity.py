@@ -427,29 +427,32 @@ class IconCache:
         self._cache = {}
         self._provider = QtWidgets.QFileIconProvider()
 
-    def get(self, path, size):
-        key = (path.lower(), size)
+    def get(self, path, size, dpr=1.0):
+        """Icon of *size* logical px, rendered for a screen scale of *dpr*."""
+        key = (path.lower(), size, dpr)
         pm = self._cache.get(key)
         if pm is not None:
             return pm
 
-        src = shell_icon(path, want=size)
+        px = max(1, round(size * dpr))  # physical pixels - sharp at 125/150 %
+        src = shell_icon(path, want=px)
         if src is None or src.isNull():
             info = QtCore.QFileInfo(path)
             icon = self._provider.icon(info)
             if icon.isNull():
                 icon = self._provider.icon(QtWidgets.QFileIconProvider.IconType.File)
-            src = icon.pixmap(QSize(size, size))
+            src = icon.pixmap(QSize(px, px))
 
         if src.isNull():
-            src = QtGui.QPixmap(size, size)
+            src = QtGui.QPixmap(px, px)
             src.fill(QtGui.QColor(120, 120, 120, 160))
 
         pm = src.scaled(
-            size, size,
+            px, px,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        pm.setDevicePixelRatio(dpr)
         self._cache[key] = pm
         return pm
 
@@ -742,6 +745,7 @@ class Box(QtWidgets.QWidget):
         f.setPointSizeF(8.5)
         p.setFont(f)
         fm = QtGui.QFontMetrics(f)
+        dpr = p.device().devicePixelRatio()
 
         for i, r in enumerate(self._rects):
             if r.bottom() < HEADER_H or r.top() > self.height():
@@ -753,9 +757,11 @@ class Box(QtWidgets.QWidget):
                 hp.addRoundedRect(QtCore.QRectF(r.adjusted(2, 2, -2, -2)), 6, 6)
                 p.fillPath(hp, QtGui.QColor(255, 255, 255, 34))
 
-            pm = ICONS.get(path_i, self.icon_size)
-            ix = r.x() + (r.width() - pm.width()) // 2
-            iy = r.y() + 5 + (self.icon_size - pm.height()) // 2
+            pm = ICONS.get(path_i, self.icon_size, dpr)
+            pw = round(pm.width() / pm.devicePixelRatio())
+            ph = round(pm.height() / pm.devicePixelRatio())
+            ix = r.x() + (r.width() - pw) // 2
+            iy = r.y() + 5 + (self.icon_size - ph) // 2
             if not os.path.exists(path_i):
                 p.setOpacity(0.45)
             p.drawPixmap(ix, iy, pm)
