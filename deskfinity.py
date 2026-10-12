@@ -25,11 +25,16 @@ import json
 import uuid
 import shutil
 import ctypes
+import fnmatch
+import time
+import getpass
+import logging
+import threading
 import subprocess
-import traceback
 from ctypes import wintypes
+from logging.handlers import RotatingFileHandler
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtNetwork, QtWidgets
 from PyQt6.QtCore import Qt, QRect, QPoint, QSize
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -41,9 +46,44 @@ CONFIG_DIR = os.path.join(
 CONFIG_PATH = os.path.join(CONFIG_DIR, "boxes.json")
 STORE_DIR = os.path.join(CONFIG_DIR, "storage")
 
+LOG_PATH = os.path.join(CONFIG_DIR, "deskfinity.log")
+
+log = logging.getLogger(APP_NAME)
+
+ITEMS_MIME = "application/x-deskfinity-items"  # drags between boxes
+
 HEADER_H = 26
 EDGE = 7          # resize hit zone
 MIN_W, MIN_H = 160, 110
+BACKUPS = 3       # boxes.json.bak1 .. bak3, taken at startup
+
+
+# --------------------------------------------------------------------------- #
+#  Logging - pythonw has no console, so errors go to a file
+# --------------------------------------------------------------------------- #
+def setup_logging():
+    log.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        fh = RotatingFileHandler(
+            LOG_PATH, maxBytes=512 * 1024, backupCount=2, encoding="utf-8"
+        )
+        fh.setFormatter(fmt)
+        log.addHandler(fh)
+    except Exception:
+        pass
+    if sys.stderr is not None:  # running under python.exe
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        log.addHandler(sh)
+
+    # Without a custom hook PyQt6 aborts the process on any exception raised
+    # inside a slot; log it and keep running instead.
+    def _excepthook(etype, value, tb):
+        log.error("Unhandled exception", exc_info=(etype, value, tb))
+
+    sys.excepthook = _excepthook
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +203,7 @@ if IS_WINDOWS:
 
             raw = bytearray(buf.raw)
             # If the icon carries no alpha channel, rebuild it from the mask.
-            if not any(raw[3::4]):
+            if raw[3::4].count(0) == w * h:
                 mbmi = BITMAPINFO()
                 mbmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
                 mbmi.bmiHeader.biWidth = w
@@ -180,10 +220,7 @@ if IS_WINDOWS:
                     )
                 finally:
                     user32.ReleaseDC(None, hdc)
-                mraw = mbuf.raw
-                for i in range(w * h):
-                    # mask: white (0xFF) = transparent
-                    raw[i * 4 + 3] = 0 if mraw[i * 4] else 255
+                raw[3::4] = _alpha_from_mask(mbuf.raw)
 
             img = QtGui.QImage(
                 bytes(raw), w, h, QtGui.QImage.Format.Format_ARGB32
@@ -255,62 +292,94 @@ if IS_WINDOWS:
             pass
         return None
 
-    def _content_rect(img):
-        """Bounding box of non-transparent pixels (jumbo icons are padded)."""
-        w, h = img.width(), img.height()
-        try:
-            ptr = img.constBits()
-            ptr.setsize(img.sizeInBytes())
-            data = bytes(ptr)
-            bpl = img.bytesPerLine()
-        except Exception:
-            return QRect(0, 0, w, h)
-
-        left, top, right, bottom = w, h, -1, -1
-        step = 1 if w <= 64 else 2
-        for y in range(0, h, step):
-            base = y * bpl
-            row = data[base:base + w * 4]
-            alphas = row[3::4]
-            if not any(a > 8 for a in alphas):
-                continue
-            if y < top:
-                top = y
-            bottom = y
-            for x in range(0, w, step):
-                if alphas[x] > 8:
-                    if x < left:
-                        left = x
-                    if x > right:
-                        right = x
-        if right < 0:
-            return QRect(0, 0, w, h)
-        pad = step
-        left = max(0, left - pad)
-        top = max(0, top - pad)
-        right = min(w - 1, right + pad)
-        bottom = min(h - 1, bottom + pad)
-        return QRect(left, top, right - left + 1, bottom - top + 1)
-
 else:  # non-Windows fallback so the file at least imports elsewhere
     def shell_icon(path, want=256):
         return None
 
 
+# Per-pixel work goes through bytes.translate()/find(), which run in C -
+# a Python loop over a 256x256 jumbo icon costs tens of milliseconds.
+_VISIBLE = bytes(0 if a <= 8 else 1 for a in range(256))
+_MASK_TO_ALPHA = bytes([255] + [0] * 255)   # AND mask: 0 = opaque
+
+
+def _alpha_from_mask(mask_bgra):
+    """Alpha bytes rebuilt from a 32-bit icon AND mask (white = clear)."""
+    return mask_bgra[0::4].translate(_MASK_TO_ALPHA)
+
+
+def _content_rect(img):
+    """Bounding box of non-transparent pixels (jumbo icons are padded)."""
+    w, h = img.width(), img.height()
+    try:
+        ptr = img.constBits()
+        ptr.setsize(img.sizeInBytes())
+        data = bytes(ptr)
+        bpl = img.bytesPerLine()
+    except Exception:
+        return QRect(0, 0, w, h)
+
+    left, top, right, bottom = w, -1, -1, -1
+    for y in range(h):
+        base = y * bpl
+        row = data[base + 3:base + w * 4:4].translate(_VISIBLE)
+        first = row.find(1)
+        if first < 0:
+            continue
+        if top < 0:
+            top = y
+        bottom = y
+        left = min(left, first)
+        right = max(right, row.rfind(1))
+    if right < 0:
+        return QRect(0, 0, w, h)
+    left = max(0, left - 1)
+    top = max(0, top - 1)
+    right = min(w - 1, right + 1)
+    bottom = min(h - 1, bottom + 1)
+    return QRect(left, top, right - left + 1, bottom - top + 1)
+
+
 # --------------------------------------------------------------------------- #
 #  File relocation helpers
 # --------------------------------------------------------------------------- #
-def desktop_dir():
-    """Real filesystem path of the user's Desktop (locale-independent)."""
+def _shell_folder(csidl):
+    """Filesystem path of a CSIDL shell folder, or None."""
     if IS_WINDOWS:
         try:
             buf = ctypes.create_unicode_buffer(260)
-            # CSIDL_DESKTOPDIRECTORY = 0x0010, SHGFP_TYPE_CURRENT = 0
-            if shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf) == 0:
+            # SHGFP_TYPE_CURRENT = 0
+            if shell32.SHGetFolderPathW(None, csidl, None, 0, buf) == 0:
                 return buf.value
         except Exception:
             pass
-    return os.path.join(os.path.expanduser("~"), "Desktop")
+    return None
+
+
+def desktop_dir():
+    """Real filesystem path of the user's Desktop (locale-independent)."""
+    # CSIDL_DESKTOPDIRECTORY = 0x0010
+    return _shell_folder(0x0010) or os.path.join(os.path.expanduser("~"), "Desktop")
+
+
+def desktop_folders():
+    """The user's and the shared (Public) Desktop folders."""
+    # CSIDL_COMMON_DESKTOPDIRECTORY = 0x0019
+    return [d for d in (desktop_dir(), _shell_folder(0x0019)) if d]
+
+
+def desktop_dirs():
+    """desktop_folders(), normalised for comparisons."""
+    return {os.path.normcase(os.path.abspath(d)) for d in desktop_folders()}
+
+
+def on_desktop(path):
+    """True if *path* sits directly on one of the Desktop folders."""
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        return os.path.normcase(parent) in desktop_dirs()
+    except Exception:
+        return False
 
 
 def unique_target(folder, name):
@@ -327,6 +396,20 @@ def unique_target(folder, name):
         n += 1
 
 
+def _ps_literal(text):
+    """*text* as a PowerShell single-quoted string literal."""
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _elevation_command(script):
+    """PowerShell command that runs *script* elevated and waits for it."""
+    return (
+        "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden "
+        "-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass',"
+        "'-File',%s" % _ps_literal('"%s"' % script)
+    )
+
+
 def elevated_move(pairs, parent=None):
     """Move (src, dst) pairs with an admin prompt. Returns pairs that landed."""
     if not IS_WINDOWS or not pairs:
@@ -337,25 +420,89 @@ def elevated_move(pairs, parent=None):
         lines = ["$ErrorActionPreference = 'Continue'"]
         for src, dst in pairs:
             lines.append(
-                "try { Move-Item -LiteralPath '%s' -Destination '%s' -Force } "
-                "catch { }" % (src.replace("'", "''"), dst.replace("'", "''"))
+                "try { Move-Item -LiteralPath %s -Destination %s -Force } "
+                "catch { }" % (_ps_literal(src), _ps_literal(dst))
             )
         with open(script, "w", encoding="utf-8-sig") as fh:
             fh.write("\n".join(lines))
 
-        cmd = (
-            "Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden "
-            "-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass',"
-            "'-File','\"%s\"'" % script
-        )
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", cmd],
+            ["powershell", "-NoProfile", "-Command", _elevation_command(script)],
             creationflags=0x08000000, timeout=180,
         )
     except Exception:
-        traceback.print_exc()
+        log.exception("Elevated move failed")
         return []
-    return [(s, d) for s, d in pairs if os.path.exists(d)]
+    landed = [(s, d) for s, d in pairs if os.path.exists(d)]
+    for s, d in landed:
+        log.info("Moved (elevated) %s -> %s", s, d)
+    return landed
+
+
+# --------------------------------------------------------------------------- #
+#  Auto-sort rules
+# --------------------------------------------------------------------------- #
+# A rule is a name pattern: "*" / "?" wildcards, case-insensitive. Plain
+# patterns match files; a trailing "/" matches folders instead ("*/").
+RULE_PRESETS = [
+    ("Документы", "*.pdf; *.doc; *.docx; *.odt; *.rtf; *.txt; *.md; "
+                  "*.xls; *.xlsx; *.ods; *.csv; *.ppt; *.pptx; *.odp"),
+    ("Картинки", "*.png; *.jpg; *.jpeg; *.gif; *.bmp; *.webp; *.svg; "
+                 "*.tif; *.tiff; *.heic; *.psd"),
+    ("Видео", "*.mp4; *.mkv; *.avi; *.mov; *.webm; *.wmv"),
+    ("Музыка", "*.mp3; *.wav; *.flac; *.ogg; *.m4a; *.aac"),
+    ("Архивы", "*.zip; *.rar; *.7z; *.tar; *.gz; *.bz2; *.xz"),
+    ("Установщики", "*.exe; *.msi; *.msix; *.appx"),
+    ("Ярлыки", "*.lnk; *.url"),
+    ("Папки", "*/"),
+]
+
+# never auto-sorted: half-downloaded files, Office lock files, shell files
+_SORT_SKIP_SUFFIXES = (
+    ".tmp", ".crdownload", ".part", ".partial", ".download", ".opdownload",
+)
+_SORT_SKIP_NAMES = {"desktop.ini", "thumbs.db"}
+
+
+def parse_rules(text):
+    """Patterns from "a; b, c" (also newlines), trimmed and de-duplicated."""
+    out = []
+    for raw in text.replace(",", ";").replace("\n", ";").split(";"):
+        pat = raw.strip()
+        if pat and pat.lower() not in (o.lower() for o in out):
+            out.append(pat)
+    return out
+
+
+def rules_match(rules, name, is_dir):
+    """True if any pattern in *rules* matches an item called *name*."""
+    name = name.lower()
+    for pat in rules:
+        pat = pat.lower()
+        if pat.endswith("/"):
+            if is_dir and fnmatch.fnmatchcase(name, pat[:-1] or "*"):
+                return True
+        elif not is_dir and fnmatch.fnmatchcase(name, pat):
+            return True
+    return False
+
+
+def skip_for_sorting(path):
+    """Items auto-sort must leave alone (temporary, hidden or system)."""
+    name = os.path.basename(path).lower()
+    if (
+        name in _SORT_SKIP_NAMES
+        or name.startswith("~$")
+        or name.endswith(_SORT_SKIP_SUFFIXES)
+    ):
+        return True
+    if IS_WINDOWS:
+        try:
+            # FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+            return bool(os.stat(path).st_file_attributes & 0x6)
+        except (OSError, AttributeError):
+            return True
+    return name.startswith(".")
 
 
 # --------------------------------------------------------------------------- #
@@ -366,29 +513,32 @@ class IconCache:
         self._cache = {}
         self._provider = QtWidgets.QFileIconProvider()
 
-    def get(self, path, size):
-        key = (path.lower(), size)
+    def get(self, path, size, dpr=1.0):
+        """Icon of *size* logical px, rendered for a screen scale of *dpr*."""
+        key = (path.lower(), size, dpr)
         pm = self._cache.get(key)
         if pm is not None:
             return pm
 
-        src = shell_icon(path, want=size)
+        px = max(1, round(size * dpr))  # physical pixels - sharp at 125/150 %
+        src = shell_icon(path, want=px)
         if src is None or src.isNull():
             info = QtCore.QFileInfo(path)
             icon = self._provider.icon(info)
             if icon.isNull():
                 icon = self._provider.icon(QtWidgets.QFileIconProvider.IconType.File)
-            src = icon.pixmap(QSize(size, size))
+            src = icon.pixmap(QSize(px, px))
 
         if src.isNull():
-            src = QtGui.QPixmap(size, size)
+            src = QtGui.QPixmap(px, px)
             src.fill(QtGui.QColor(120, 120, 120, 160))
 
         pm = src.scaled(
-            size, size,
+            px, px,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        pm.setDevicePixelRatio(dpr)
         self._cache[key] = pm
         return pm
 
@@ -397,6 +547,34 @@ class IconCache:
 
 
 ICONS = None  # created after QApplication exists
+
+# path -> (exists, is_dir). Filled by Manager on a worker thread: on an
+# offline network path os.path.exists() can block for seconds, so it must
+# never run inside paintEvent.
+STATUS = {}
+STATUS_INTERVAL_MS = 4000
+
+
+# --------------------------------------------------------------------------- #
+#  Screens
+# --------------------------------------------------------------------------- #
+def screen_areas():
+    """Available desktop areas of all monitors, the primary one first."""
+    primary = QtGui.QGuiApplication.primaryScreen()
+    screens = sorted(
+        QtGui.QGuiApplication.screens(), key=lambda s: s is not primary
+    )
+    return [s.availableGeometry() for s in screens]
+
+
+def header_visible(rect, areas):
+    """True if enough of the header strip of *rect* is on some screen."""
+    header = QRect(rect.x(), rect.y(), rect.width(), HEADER_H)
+    for a in areas:
+        r = header.intersected(a)
+        if r.width() >= 40 and r.height() >= HEADER_H // 2:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -432,6 +610,7 @@ class Box(QtWidgets.QWidget):
         self.label_color = QtGui.QColor(*d.get("label_color", [235, 235, 240]))
         self.collapsed = bool(d.get("collapsed", False))
         self.locked = bool(d.get("locked", False))
+        self.rules = [r for r in d.get("rules", []) if isinstance(r, str)]
 
         g = d.get("geometry", [200, 200, 320, 260])
         self._expanded_h = g[3]
@@ -445,11 +624,15 @@ class Box(QtWidgets.QWidget):
         self._press_pos = QPoint()
         self._press_geo = QRect()
         self._hover_index = -1
-        self._drag_index = -1
+        self._drag_index = -1        # item under a press that may start a drag
         self._drag_pos = QPoint()
-        self._dragging_item = False
+        self._selected = set()       # selected item paths
+        self._anchor = -1            # index Shift+click extends from
+        self._collapse_to = None     # plain click inside a selection
+        self._drop_at = None         # insert marker while items hover here
         self._scroll = 0
         self._drop_hint = False
+        self._home = None            # real spot while parked on a visible screen
 
         self._rects = []
         self._cols = 1
@@ -459,12 +642,13 @@ class Box(QtWidgets.QWidget):
     def to_dict(self):
         g = self.geometry()
         h = self._expanded_h if self.collapsed else g.height()
+        pos = self._home if self._home is not None else g.topLeft()
         return {
             "uid": self.uid,
             "title": self.title,
             "move_files": self.move_files,
             "items": self.items,
-            "geometry": [g.x(), g.y(), g.width(), h],
+            "geometry": [pos.x(), pos.y(), g.width(), h],
             "color": [self.bg_color.red(), self.bg_color.green(), self.bg_color.blue()],
             "alpha": self.bg_alpha,
             "icon_size": self.icon_size,
@@ -476,6 +660,7 @@ class Box(QtWidgets.QWidget):
             ],
             "collapsed": self.collapsed,
             "locked": self.locked,
+            "rules": self.rules,
         }
 
     # ------------------------------------------------------- file relocation
@@ -492,15 +677,26 @@ class Box(QtWidgets.QWidget):
             return False
 
     def _ingest(self, path):
-        """Physically move *path* into this box. Returns (new_path, pending)."""
-        if not self.move_files or not os.path.exists(path) or self._in_store(path):
+        """Physically move *path* into this box. Returns (new_path, pending).
+
+        Only items lying directly on the Desktop are moved; anything dropped
+        from another folder or drive stays where it is and is kept as a link.
+        """
+        if (
+            not self.move_files
+            or not os.path.exists(path)
+            or self._in_store(path)
+            or not on_desktop(path)
+        ):
             return path, None
         target = unique_target(self.store_dir(), os.path.basename(path))
         try:
             shutil.move(path, target)
+            log.info("Moved %s -> %s", path, target)
             return target, None
-        except Exception:
+        except Exception as e:
             # typically C:\Users\Public\Desktop - needs elevation
+            log.warning("Could not move %s: %s", path, e)
             return path, (path, target)
 
     def _eject(self, path):
@@ -510,9 +706,12 @@ class Box(QtWidgets.QWidget):
         target = unique_target(desktop_dir(), os.path.basename(path))
         try:
             shutil.move(path, target)
-            return True
-        except Exception:
+        except Exception as e:
+            log.warning("Could not move %s back to the desktop: %s", path, e)
             return False
+        log.info("Moved %s -> %s", path, target)
+        self.manager.placed_on_desktop(target)  # auto-sort leaves it there
+        return True
 
     def _resolve_pending(self, pending):
         """Offer an elevated retry for items that could not be moved."""
@@ -539,7 +738,12 @@ class Box(QtWidgets.QWidget):
                     n += 1
         return n
 
-    def add_paths(self, paths):
+    def add_paths(self, paths, ask=True):
+        """Add items; desktop items are moved in. Returns how many were added.
+
+        With ask=False (auto-sort) an item that cannot be moved without admin
+        rights is skipped instead of raising a UAC prompt.
+        """
         existing = {p.lower() for p in self.items}
         added, pending = 0, []
         for p in paths:
@@ -547,6 +751,8 @@ class Box(QtWidgets.QWidget):
             if p.lower() in existing:
                 continue
             new_path, pend = self._ingest(p)
+            if pend and not ask:
+                continue
             if pend:
                 pending.append(pend)
             self.items.append(new_path)
@@ -651,8 +857,16 @@ class Box(QtWidgets.QWidget):
         f.setBold(True)
         p.setFont(f)
         p.setPen(self.label_color)
-        tr = QRect(10, 0, self.width() - 20, HEADER_H)
+        tr = QRect(10, 0, self.width() - (32 if self.rules else 20), HEADER_H)
         fm = QtGui.QFontMetrics(f)
+        if self.rules:  # small dot: this box sorts the desktop by itself
+            dot = QtGui.QColor(self.label_color)
+            dot.setAlpha(170)
+            p.save()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(dot)
+            p.drawEllipse(QtCore.QPointF(self.width() - 14, HEADER_H / 2), 3, 3)
+            p.restore()
         p.drawText(
             tr,
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
@@ -668,35 +882,48 @@ class Box(QtWidgets.QWidget):
         f.setPointSizeF(8.5)
         p.setFont(f)
         fm = QtGui.QFontMetrics(f)
+        dpr = p.device().devicePixelRatio()
 
         for i, r in enumerate(self._rects):
             if r.bottom() < HEADER_H or r.top() > self.height():
                 continue
             path_i = self.items[i]
 
-            if i == self._hover_index and not self._dragging_item:
+            selected = path_i in self._selected
+            if selected or i == self._hover_index:
                 hp = QtGui.QPainterPath()
                 hp.addRoundedRect(QtCore.QRectF(r.adjusted(2, 2, -2, -2)), 6, 6)
-                p.fillPath(hp, QtGui.QColor(255, 255, 255, 34))
+                p.fillPath(hp, QtGui.QColor(255, 255, 255, 64 if selected else 34))
+                if selected:
+                    p.save()
+                    p.setPen(QtGui.QPen(QtGui.QColor(120, 190, 255, 200), 1.2))
+                    p.drawPath(hp)
+                    p.restore()
 
-            pm = ICONS.get(path_i, self.icon_size)
-            ix = r.x() + (r.width() - pm.width()) // 2
-            iy = r.y() + 5 + (self.icon_size - pm.height()) // 2
-            if not os.path.exists(path_i):
+            pm = ICONS.get(path_i, self.icon_size, dpr)
+            pw = round(pm.width() / pm.devicePixelRatio())
+            ph = round(pm.height() / pm.devicePixelRatio())
+            ix = r.x() + (r.width() - pw) // 2
+            iy = r.y() + 5 + (self.icon_size - ph) // 2
+            exists, is_dir = STATUS.get(path_i, (None, False))
+            if exists is None:
+                self.manager.request_status()
+            elif not exists:
                 p.setOpacity(0.45)
             p.drawPixmap(ix, iy, pm)
             p.setOpacity(1.0)
 
-            name = os.path.splitext(os.path.basename(path_i))[0] or path_i
+            base = os.path.basename(path_i)
+            # hide file extensions like Explorer does, but keep "my.project"
+            name = (base if is_dir else os.path.splitext(base)[0]) or path_i
             lr = QRect(r.x() + 2, r.y() + self.icon_size + 8, r.width() - 4, 28)
             p.setPen(QtGui.QColor(0, 0, 0, 130))
             self._draw_wrapped(p, lr.translated(0, 1), name, fm)
             p.setPen(self.label_color)
             self._draw_wrapped(p, lr, name, fm)
 
-        if self._dragging_item and 0 <= self._drag_index < len(self.items):
-            tgt = self._insert_index(self.mapFromGlobal(QtGui.QCursor.pos()))
-            self._draw_insert_marker(p, tgt)
+        if self._drop_at is not None:
+            self._draw_insert_marker(p, self._drop_at)
 
         if not self.items:
             p.setPen(QtGui.QColor(255, 255, 255, 110))
@@ -773,10 +1000,11 @@ class Box(QtWidgets.QWidget):
         if self.locked:
             return ""
         d = ""
-        if pos.y() <= EDGE:
-            d += "t"
-        elif pos.y() >= self.height() - EDGE:
-            d += "b"
+        if not self.collapsed:  # a collapsed box is all header: width only
+            if pos.y() <= EDGE:
+                d += "t"
+            elif pos.y() >= self.height() - EDGE:
+                d += "b"
         if pos.x() <= EDGE:
             d += "l"
         elif pos.x() >= self.width() - EDGE:
@@ -792,11 +1020,10 @@ class Box(QtWidgets.QWidget):
         if self._mode == "resize":
             self._do_resize(ev.globalPosition().toPoint())
             return
-        if self._drag_index >= 0 and not self._dragging_item:
-            if (pos - self._drag_pos).manhattanLength() > 8:
-                self._dragging_item = True
-        if self._dragging_item:
-            self.update()
+        if self._drag_index >= 0:
+            if (pos - self._drag_pos).manhattanLength() >= \
+                    QtWidgets.QApplication.startDragDistance():
+                self._start_drag()
             return
 
         d = self._edge_at(pos)
@@ -814,6 +1041,8 @@ class Box(QtWidgets.QWidget):
             self.update()
         if idx >= 0:
             self.setToolTip(self.items[idx])
+        elif pos.y() < HEADER_H and self.rules:
+            self.setToolTip("Автосортировка: " + "; ".join(self.rules))
         else:
             self.setToolTip("")
 
@@ -835,25 +1064,48 @@ class Box(QtWidgets.QWidget):
                 self._mode = "move"
             return
         idx = self._hit_item(pos)
+        self._select_at(idx, ev.modifiers())
         if idx >= 0 and not self.locked:
             self._drag_index = idx
             self._drag_pos = pos
 
+    def _select_at(self, idx, mods):
+        """Explorer-style selection: click, Ctrl+click, Shift+click."""
+        self.manager.clear_selection(keep=self)
+        self._collapse_to = None
+        if idx < 0:
+            self._selected.clear()
+        else:
+            path = self.items[idx]
+            if mods & Qt.KeyboardModifier.ControlModifier:
+                self._selected ^= {path}
+                self._anchor = idx
+            elif mods & Qt.KeyboardModifier.ShiftModifier and \
+                    0 <= self._anchor < len(self.items):
+                lo, hi = sorted((self._anchor, idx))
+                self._selected = set(self.items[lo:hi + 1])
+            elif path in self._selected:
+                self._collapse_to = path   # keep the group for a drag
+            else:
+                self._selected = {path}
+                self._anchor = idx
+        self.update()
+
+    def clear_selection(self):
+        if self._selected:
+            self._selected.clear()
+            self.update()
+
     def mouseReleaseEvent(self, ev):
-        if self._dragging_item and self._drag_index >= 0:
-            tgt = self._insert_index(ev.position().toPoint())
-            item = self.items.pop(self._drag_index)
-            if tgt > self._drag_index:
-                tgt -= 1
-            tgt = max(0, min(len(self.items), tgt))
-            self.items.insert(tgt, item)
+        if self._mode in ("move", "resize"):
+            self._home = None  # the user picked a new spot
             self.manager.save()
-        elif self._mode in ("move", "resize"):
-            self.manager.save()
+        elif self._collapse_to is not None:  # a click, not a drag
+            self._selected = {self._collapse_to}
         self._mode = None
         self._resize_dir = ""
         self._drag_index = -1
-        self._dragging_item = False
+        self._collapse_to = None
         self.update()
 
     def mouseDoubleClickEvent(self, ev):
@@ -883,45 +1135,243 @@ class Box(QtWidgets.QWidget):
     def _do_resize(self, gpos):
         delta = gpos - self._press_pos
         g = QRect(self._press_geo)
+        # clamp the dragged edge so the opposite one never moves
         if "l" in self._resize_dir:
-            g.setLeft(g.left() + delta.x())
+            g.setLeft(min(g.left() + delta.x(), g.right() - MIN_W + 1))
         if "r" in self._resize_dir:
-            g.setRight(g.right() + delta.x())
+            g.setRight(max(g.right() + delta.x(), g.left() + MIN_W - 1))
         if "t" in self._resize_dir:
-            g.setTop(g.top() + delta.y())
+            g.setTop(min(g.top() + delta.y(), g.bottom() - MIN_H + 1))
         if "b" in self._resize_dir:
-            g.setBottom(g.bottom() + delta.y())
-        if g.width() < MIN_W:
-            g.setWidth(MIN_W)
-        if g.height() < MIN_H:
-            g.setHeight(MIN_H)
+            g.setBottom(max(g.bottom() + delta.y(), g.top() + MIN_H - 1))
+        if self.collapsed:
+            g.setHeight(HEADER_H)
+        else:
+            self._expanded_h = g.height()
         self.setGeometry(g)
-        self._expanded_h = g.height()
+
+    def fit_to_screens(self, areas):
+        """Keep the header reachable when monitors are added or removed.
+
+        A box that ends up off every screen is parked on the primary one; its
+        real spot stays in _home (and in the saved config) and it moves back
+        as soon as that spot is visible again.
+        """
+        if not areas:
+            return
+        if self._home is not None and header_visible(
+            QRect(self._home, self.size()), areas
+        ):
+            self.move(self._home)
+            self._home = None
+            return
+        if header_visible(self.geometry(), areas):
+            return
+        if self._home is None:
+            self._home = self.geometry().topLeft()
+        a = areas[0]
+        x = max(a.left(), min(self.x(), a.right() - self.width() + 1))
+        y = max(a.top(), min(self.y(), a.bottom() - self.height() + 1))
+        self.move(x, y)
+        log.info("Box %s parked on screen (was at %d,%d)",
+                 self.uid, self._home.x(), self._home.y())
 
     # ------------------------------------------------------------ drag&drop
+    def selection(self):
+        """Selected paths in box order."""
+        return [p for p in self.items if p in self._selected]
+
+    def _make_mime(self, paths):
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(p) for p in paths])
+        mime.setData(
+            ITEMS_MIME,
+            json.dumps({"box": self.uid, "paths": paths}).encode("utf-8"),
+        )
+        return mime
+
+    def _drag_pixmap(self, paths):
+        pm = QtGui.QPixmap(
+            ICONS.get(paths[0], self.icon_size, self.devicePixelRatioF())
+        )
+        if len(paths) > 1:  # count badge
+            p = QtGui.QPainter(pm)
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            w = pm.width() / pm.devicePixelRatio()
+            badge = QtCore.QRectF(w - 20, 0, 20, 20)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(60, 130, 200))
+            p.drawEllipse(badge)
+            p.setPen(QtGui.QColor(255, 255, 255))
+            f = p.font()
+            f.setBold(True)
+            f.setPointSizeF(8)
+            p.setFont(f)
+            p.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), str(len(paths)))
+            p.end()
+        return pm
+
+    def _start_drag(self):
+        """Drag the selection: to another box, within this one, or out."""
+        idx, self._drag_index = self._drag_index, -1
+        self._collapse_to = None
+        if not 0 <= idx < len(self.items):
+            return
+        if self.items[idx] not in self._selected:
+            self._selected = {self.items[idx]}
+        paths = self.selection()
+        existed = [p for p in paths if os.path.exists(p)]
+        drag = QtGui.QDrag(self)
+        drag.setMimeData(self._make_mime(paths))
+        pm = self._drag_pixmap(paths)
+        drag.setPixmap(pm)
+        half = round(pm.width() / pm.devicePixelRatio() / 2)
+        drag.setHotSpot(QPoint(half, half))
+        self._exec_drag(drag)
+        for p in existed:
+            # if it went to the desktop, auto-sort must not bring it back
+            self.manager.placed_on_desktop(
+                os.path.join(desktop_dir(), os.path.basename(p)), hold_s=15
+            )
+        self._after_drag(existed)
+        # Explorer may finish a move after the drop has returned
+        for ms in (1500, 5000):
+            t = QtCore.QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(lambda e=existed: self._after_drag(e))
+            t.timeout.connect(t.deleteLater)
+            t.start(ms)
+
+    def _exec_drag(self, drag):
+        return drag.exec(
+            Qt.DropAction.MoveAction | Qt.DropAction.CopyAction
+            | Qt.DropAction.LinkAction,
+            Qt.DropAction.MoveAction,
+        )
+
+    def _after_drag(self, existed):
+        """Forget items another program (Explorer, the desktop) moved away."""
+        gone = [p for p in existed if p in self.items and not os.path.exists(p)]
+        for p in gone:
+            self.items.remove(p)
+            log.info("Dragged out of box %s: %s", self.uid, p)
+        self._selected &= set(self.items)
+        if gone:
+            self.manager.save()
+            self.manager.request_status()
+        self.update()
+
+    def _dragged_items(self, mime):
+        """(source box, paths) for a drag that started in a box, else None."""
+        if not mime.hasFormat(ITEMS_MIME):
+            return None
+        try:
+            info = json.loads(bytes(mime.data(ITEMS_MIME)).decode("utf-8"))
+            src = self.manager.box_by_uid(info["box"])
+            paths = [p for p in info["paths"] if isinstance(p, str)]
+        except Exception:
+            return None
+        return (src, paths) if src is not None else None
+
     def dragEnterEvent(self, ev):
-        if ev.mimeData().hasUrls():
+        md = ev.mimeData()
+        if md.hasUrls() or md.hasFormat(ITEMS_MIME):
             ev.acceptProposedAction()
             self._drop_hint = True
             self.update()
 
     def dragMoveEvent(self, ev):
-        if ev.mimeData().hasUrls():
+        md = ev.mimeData()
+        if md.hasFormat(ITEMS_MIME):
+            ev.setDropAction(Qt.DropAction.MoveAction)
+            ev.accept()
+            at = self._insert_index(ev.position().toPoint())
+            if at != self._drop_at:
+                self._drop_at = at
+                self.update()
+        elif md.hasUrls():
             ev.acceptProposedAction()
 
     def dragLeaveEvent(self, ev):
         self._drop_hint = False
+        self._drop_at = None
         self.update()
 
     def dropEvent(self, ev):
         self._drop_hint = False
-        paths = [
-            u.toLocalFile() for u in ev.mimeData().urls() if u.toLocalFile()
-        ]
-        if paths:
-            self.add_paths(paths)
-            ev.acceptProposedAction()
+        self._drop_at = None
+        at = None if self.collapsed else self._insert_index(ev.position().toPoint())
+        internal = self._dragged_items(ev.mimeData())
+        if internal is not None:
+            src, paths = internal
+            if src is self:
+                if at is not None:
+                    self.reorder(paths, at)
+            else:
+                self.take_from(src, paths, at)
+            ev.setDropAction(Qt.DropAction.MoveAction)
+            ev.accept()
+        else:
+            paths = [
+                u.toLocalFile() for u in ev.mimeData().urls() if u.toLocalFile()
+            ]
+            if paths:
+                self.add_paths(paths)
+                ev.acceptProposedAction()
         self.update()
+
+    def reorder(self, paths, at):
+        """Move *paths* (kept in their order) to insert position *at*."""
+        moving = set(paths)
+        block = [p for p in self.items if p in moving]
+        if not block:
+            return
+        before = sum(1 for p in self.items[:at] if p in moving)
+        rest = [p for p in self.items if p not in moving]
+        at = max(0, min(len(rest), at - before))
+        self.items = rest[:at] + block + rest[at:]
+        self.manager.save()
+        self.update()
+
+    def take_from(self, source, paths, at=None):
+        """Move *paths* from box *source* into this box. Returns the count.
+
+        Files stored by *source* move into this box's storage; links stay
+        links (a desktop item is moved in if this box moves files).
+        """
+        have = {p.lower() for p in self.items}
+        taken = []
+        for p in paths:
+            if p not in source.items:
+                continue
+            new = p
+            if source._in_store(p) and os.path.exists(p):
+                target = unique_target(self.store_dir(), os.path.basename(p))
+                try:
+                    shutil.move(p, target)
+                except Exception as e:
+                    log.warning("Could not move %s to box %s: %s", p, self.uid, e)
+                    continue
+                log.info("Moved %s -> %s", p, target)
+                new = target
+            else:
+                new, _ = self._ingest(p)   # needs admin rights: stays a link
+            source.items.remove(p)
+            if new.lower() not in have:
+                taken.append(new)
+                have.add(new.lower())
+        if at is None:
+            at = len(self.items)
+        at = max(0, min(len(self.items), at))
+        self.items[at:at] = taken
+        source._selected &= set(source.items)
+        self.manager.clear_selection(keep=self)
+        self._selected = set(taken)
+        source.update()
+        self.update()
+        self.manager.save()
+        self.manager.request_status()
+        return len(taken)
 
     # ------------------------------------------------------------- actions
     def open_item(self, idx):
@@ -964,6 +1414,7 @@ class Box(QtWidgets.QWidget):
     def set_alpha(self, v):
         self.bg_alpha = int(v)
         self.update()
+        self.manager.save()  # debounced; also covers clicks and arrow keys
 
     def set_icon_size(self, v):
         self.icon_size = int(v)
@@ -1000,9 +1451,23 @@ class Box(QtWidgets.QWidget):
         self.items = [p for p in self.items if os.path.exists(p)]
         self.update()
         self.manager.save()
+        self.manager.request_status()
         QtWidgets.QMessageBox.information(
             self, APP_NAME, f"Удалено битых ссылок: {before - len(self.items)}"
         )
+
+    def edit_rules(self):
+        dlg = RulesDialog(self.title, self.rules, self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.rules = dlg.patterns()
+        self.update()
+        self.manager.save()
+        if self.rules and QtWidgets.QMessageBox.question(
+            self, APP_NAME,
+            "Разложить по этим правилам то, что уже лежит на рабочем столе?",
+        ) == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.manager.sort_desktop(only=self)
 
     def add_via_dialog(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -1017,27 +1482,42 @@ class Box(QtWidgets.QWidget):
         m = QtWidgets.QMenu(self)
 
         if idx >= 0:
-            m.addAction("Открыть", lambda: self.open_item(idx))
-            m.addAction(
-                "Показать в проводнике",
-                lambda: self._reveal(self.items[idx]),
-            )
+            if self.items[idx] not in self._selected:
+                self._select_at(idx, Qt.KeyboardModifier.NoModifier)
+            paths = self.selection()
+            n = f" ({len(paths)})" if len(paths) > 1 else ""
+            m.addAction("Открыть" + n, lambda: self.open_paths(paths))
+            if len(paths) == 1:
+                m.addAction(
+                    "Показать в проводнике", lambda: self._reveal(paths[0])
+                )
             m.addSeparator()
             m.addAction(
-                "Вынести на рабочий стол", lambda: self._remove(idx)
+                "Вынести на рабочий стол" + n, lambda: self._remove_paths(paths)
             )
+            others = [b for b in self.manager.boxes if b is not self]
+            if others:
+                move_menu = m.addMenu("Переместить в бокс" + n)
+                for b in others:
+                    move_menu.addAction(
+                        b.title, lambda _=False, t=b: t.take_from(self, paths)
+                    )
             m.addSeparator()
 
         m.addAction("Переименовать группу…", self.rename)
         m.addAction("Добавить файлы…", self.add_via_dialog)
         m.addSeparator()
 
-        a = m.addAction("Переносить файлы в бокс")
+        a = m.addAction("Переносить файлы со стола в бокс")
         a.setCheckable(True)
         a.setChecked(self.move_files)
         a.triggered.connect(self.toggle_move_files)
-        m.addAction("Перенести оригиналы в бокс", self.migrate_originals)
+        m.addAction("Перенести оригиналы со стола в бокс", self.migrate_originals)
         m.addAction("Открыть папку бокса", self.open_store)
+        m.addAction(
+            "Правила автосортировки…" + (" ●" if self.rules else ""),
+            self.edit_rules,
+        )
         m.addSeparator()
 
         m.addAction("Цвет подложки…", self.pick_color)
@@ -1050,7 +1530,6 @@ class Box(QtWidgets.QWidget):
         slider.setValue(self.bg_alpha)
         slider.setFixedWidth(180)
         slider.valueChanged.connect(self.set_alpha)
-        slider.sliderReleased.connect(self.manager.save)
         wa.setDefaultWidget(slider)
         alpha_menu.addAction(wa)
 
@@ -1100,16 +1579,32 @@ class Box(QtWidgets.QWidget):
         self.manager.save()
 
     def _remove(self, idx):
-        if not self._eject(self.items[idx]):
-            QtWidgets.QMessageBox.warning(
-                self, APP_NAME,
-                "Не удалось вынести файл на рабочий стол — он занят или нет "
-                "прав. Элемент оставлен в боксе.",
-            )
-            return
-        del self.items[idx]
+        self._remove_paths([self.items[idx]])
+
+    def _remove_paths(self, paths):
+        """Send items back to the desktop and drop them from the box."""
+        failed = []
+        for p in paths:
+            if p not in self.items:
+                continue
+            if self._eject(p):
+                self.items.remove(p)
+            else:
+                failed.append(p)
+        self._selected &= set(self.items)
         self.update()
         self.manager.save()
+        if failed:
+            QtWidgets.QMessageBox.warning(
+                self, APP_NAME,
+                f"Не удалось вынести на рабочий стол: {len(failed)} — файл "
+                "занят или нет прав. Эти элементы оставлены в боксе.",
+            )
+
+    def open_paths(self, paths):
+        for p in paths:
+            if p in self.items:
+                self.open_item(self.items.index(p))
 
     def _reveal(self, path):
         if IS_WINDOWS and os.path.exists(path):
@@ -1175,6 +1670,54 @@ class Box(QtWidgets.QWidget):
                 wp.hwndInsertAfter = ctypes.c_void_p(1)   # HWND_BOTTOM
                 wp.flags &= ~0x0004                        # clear SWP_NOZORDER
         return False, 0
+
+
+# --------------------------------------------------------------------------- #
+#  Auto-sort rules editor
+# --------------------------------------------------------------------------- #
+class RulesDialog(QtWidgets.QDialog):
+
+    def __init__(self, title, rules, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Автосортировка — {title}")
+        self.setMinimumWidth(460)
+        lay = QtWidgets.QVBoxLayout(self)
+
+        hint = QtWidgets.QLabel(
+            "Новые файлы на рабочем столе, подходящие под шаблоны, сами "
+            "переедут в этот бокс.\n"
+            "Шаблоны через «;». «*» — любые символы, «/» в конце — только "
+            "папки (например «*/»). Пусто — правило выключено."
+        )
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self.edit = QtWidgets.QLineEdit("; ".join(rules))
+        self.edit.setPlaceholderText("*.pdf; *.docx; Скриншот*")
+        self.edit.setClearButtonEnabled(True)
+        lay.addWidget(self.edit)
+
+        grid = QtWidgets.QGridLayout()
+        for i, (label, patterns) in enumerate(RULE_PRESETS):
+            btn = QtWidgets.QPushButton("+ " + label)
+            btn.setToolTip(patterns)
+            btn.clicked.connect(lambda _=False, p=patterns: self.add(p))
+            grid.addWidget(btn, i // 4, i % 4)
+        lay.addLayout(grid)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def add(self, patterns):
+        self.edit.setText("; ".join(parse_rules(self.edit.text() + ";" + patterns)))
+
+    def patterns(self):
+        return parse_rules(self.edit.text())
 
 
 # --------------------------------------------------------------------------- #
@@ -1257,37 +1800,336 @@ class DrawOverlay(QtWidgets.QWidget):
 
 
 # --------------------------------------------------------------------------- #
+#  Desktop watcher for auto-sort rules
+# --------------------------------------------------------------------------- #
+class DesktopSorter(QtCore.QObject):
+    """Moves items that newly appear on the Desktop into matching boxes.
+
+    Items present at start-up are left alone (that is what "sort now" is
+    for). A new item waits until it has been quiet for SETTLE_S seconds, so
+    downloads, copies and an in-place rename are not snatched mid-way; a
+    move that fails (file in use) is retried a few times.
+    """
+    SETTLE_S = 6.0
+    MAX_TRIES = 5
+
+    def __init__(self, manager):
+        super().__init__(manager)
+        self.manager = manager
+        self.folder = desktop_dir()
+        self._seen = self._listing()
+        self._hold = {}                # name -> time until it is left alone
+        self._tries = {}
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(1500)
+        self._timer.timeout.connect(self.scan)
+        self._watcher = QtCore.QFileSystemWatcher(self)
+        if os.path.isdir(self.folder):
+            self._watcher.addPath(self.folder)
+        self._watcher.directoryChanged.connect(lambda *_: self._timer.start())
+
+    def _listing(self):
+        try:
+            return set(os.listdir(self.folder))
+        except OSError:
+            return set()
+
+    def leave_alone(self, path, hold_s=0):
+        """*path* was put on the Desktop on purpose - do not sort it.
+
+        hold_s also covers an item that only lands there a bit later (a drag
+        to the desktop that Explorer finishes after the drop).
+        """
+        if os.path.normcase(os.path.dirname(path)) == os.path.normcase(self.folder):
+            name = os.path.basename(path)
+            self._seen.add(name)
+            if hold_s:
+                self._hold[name] = time.time() + hold_s
+
+    def scan(self):
+        names = self._listing()
+        again, now = False, time.time()
+        self._hold = {n: t for n, t in self._hold.items() if t > now}
+        self._seen &= names            # forget items that left the Desktop
+        self._seen |= names & self._hold.keys()
+        for name in sorted(names - self._seen):
+            path = os.path.join(self.folder, name)
+            if skip_for_sorting(path):
+                self._seen.add(name)
+                continue
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            # ctime is the creation time on Windows - covers copied files too
+            if now - max(st.st_mtime, st.st_ctime) < self.SETTLE_S:
+                again = True
+                continue
+            if not self.manager.sort_item(path):
+                tries = self._tries.get(name, 0) + 1
+                self._tries[name] = tries
+                if tries < self.MAX_TRIES:
+                    again = True
+                    continue
+                log.warning("Auto-sort gave up on %s", path)
+            self._seen.add(name)
+            self._tries.pop(name, None)
+        if again:
+            self._timer.start()
+
+
+# --------------------------------------------------------------------------- #
+#  Single instance
+# --------------------------------------------------------------------------- #
+_INSTANCE_MUTEX = None  # held for the lifetime of the process
+
+
+def _instance_key():
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "user"
+    return f"{APP_NAME}-{user}"
+
+
+def _claim_mutex():
+    """Windows: own a per-session named mutex. False if someone else does."""
+    global _INSTANCE_MUTEX
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR
+        ]
+        ctypes.set_last_error(0)
+        handle = kernel32.CreateMutexW(None, False, "Local\\" + _instance_key())
+        if not handle:
+            return True  # cannot tell - do not block startup
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _INSTANCE_MUTEX = handle
+    except Exception:
+        log.exception("Single-instance mutex failed")
+    return True
+
+
+def _ping_instance():
+    """Knock on a running instance's local server. True if it answered."""
+    sock = QtNetwork.QLocalSocket()
+    sock.connectToServer(_instance_key())
+    if not sock.waitForConnected(500):
+        return False
+    # Stay connected until the server hangs up: on Windows a pipe client that
+    # disconnects before the server accepts it is dropped without a signal.
+    sock.write(b"show")
+    sock.waitForBytesWritten(500)
+    sock.waitForDisconnected(1000)
+    sock.abort()
+    return True
+
+
+def another_instance_running():
+    """True if Deskfinity already runs for this user (it is asked to show)."""
+    if IS_WINDOWS and not _claim_mutex():
+        _ping_instance()
+        return True
+    return _ping_instance()
+
+
+# --------------------------------------------------------------------------- #
 #  Manager / tray
 # --------------------------------------------------------------------------- #
 class Manager(QtCore.QObject):
+    _status_ready = QtCore.pyqtSignal(object)  # emitted from a worker thread
 
     def __init__(self, app):
         super().__init__()
         self.app = app
         self.boxes = []
+        self._unloaded = []       # raw entries that failed to load - kept as is
+        self.load_notice = None   # set when the config needed rescuing
         self._overlay = None
         self._save_timer = QtCore.QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self._write)
 
+        self._status_busy = False
+        self._status_again = False
+        self._status_ready.connect(self._apply_status)
+        self._status_timer = QtCore.QTimer(self)
+        self._status_timer.setInterval(STATUS_INTERVAL_MS)
+        self._status_timer.timeout.connect(self.request_status)
+
+        # monitors come and go: re-fit boxes once things settle
+        self._fit_timer = QtCore.QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(500)
+        self._fit_timer.timeout.connect(self.fit_boxes)
+        app.screenAdded.connect(self._on_screen_added)
+        app.screenRemoved.connect(lambda *_: self._fit_timer.start())
+        app.primaryScreenChanged.connect(lambda *_: self._fit_timer.start())
+        for scr in app.screens():
+            self._watch_screen(scr)
+
+        self._listen_for_instances()
+        self.hotkey_ok = self._install_hotkey()
         self._build_tray()
         self.load()
-        self._install_hotkey()
+        self.fit_boxes()
+        self.request_status()
+        self._status_timer.start()
+        self.sorter = DesktopSorter(self)
+
+    # ----------------------------------------------------------- auto-sort
+    def _rule_box(self, path):
+        """First box whose rules match *path*, or None."""
+        name, is_dir = os.path.basename(path), os.path.isdir(path)
+        for b in self.boxes:
+            if b.rules and rules_match(b.rules, name, is_dir):
+                return b
+        return None
+
+    def _in_a_box(self, path):
+        key = os.path.normcase(os.path.normpath(path))
+        return any(
+            os.path.normcase(p) == key for b in self.boxes for p in b.items
+        )
+
+    def sort_item(self, path):
+        """Auto-sort one new Desktop item. False means "try again later"."""
+        if self._in_a_box(path):
+            return True
+        box = self._rule_box(path)
+        if box is None:
+            return True
+        box.add_paths([path], ask=False)
+        if box.move_files and os.path.exists(path):
+            return False  # in use or needs admin rights
+        log.info("Auto-sorted %s into box %s", path, box.uid)
+        return True
+
+    def sort_desktop(self, only=None):
+        """Apply the rules to everything on the Desktop now. Returns a count."""
+        groups = {}
+        for folder in desktop_folders():
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            for name in names:
+                path = os.path.join(folder, name)
+                if skip_for_sorting(path) or self._in_a_box(path):
+                    continue
+                box = self._rule_box(path)
+                if box is not None and (only is None or box is only):
+                    groups.setdefault(box, []).append(path)
+        moved = sum(b.add_paths(paths) for b, paths in groups.items())
+        QtWidgets.QMessageBox.information(
+            None, APP_NAME, f"Разложено по боксам: {moved}"
+        )
+        return moved
+
+    def box_by_uid(self, uid):
+        return next((b for b in self.boxes if b.uid == uid), None)
+
+    def clear_selection(self, keep=None):
+        """One selection at a time: clear it in every box but *keep*."""
+        for b in self.boxes:
+            if b is not keep:
+                b.clear_selection()
+
+    def placed_on_desktop(self, path, hold_s=0):
+        sorter = getattr(self, "sorter", None)
+        if sorter is not None:
+            sorter.leave_alone(path, hold_s)
+
+    # ------------------------------------------------------------- screens
+    def _watch_screen(self, scr):
+        scr.availableGeometryChanged.connect(lambda *_: self._fit_timer.start())
+
+    def _on_screen_added(self, scr):
+        self._watch_screen(scr)
+        self._fit_timer.start()
+
+    def fit_boxes(self):
+        areas = screen_areas()
+        for b in self.boxes:
+            b.fit_to_screens(areas)
+
+    # --------------------------------------------------------- item status
+    def request_status(self):
+        """Re-check which items exist, off the UI thread. Cheap to call."""
+        if self._status_busy:
+            self._status_again = True
+            return
+        self._status_busy = True
+        self._status_again = False
+        paths = {p for b in self.boxes for p in b.items}
+        threading.Thread(
+            target=self._check_status, args=(paths,), daemon=True
+        ).start()
+
+    def _check_status(self, paths):
+        result = {}
+        for p in paths:
+            try:
+                result[p] = (os.path.exists(p), os.path.isdir(p))
+            except Exception:
+                result[p] = (False, False)
+        self._status_ready.emit(result)
+
+    def _apply_status(self, result):
+        self._status_busy = False
+        changed = any(STATUS.get(p) != v for p, v in result.items())
+        STATUS.update(result)
+        if changed:
+            for b in self.boxes:
+                b.update()
+        if self._status_again:
+            self.request_status()
+
+    # ----------------------------------------------------- single instance
+    def _listen_for_instances(self):
+        """Later launches knock here instead of starting a second copy."""
+        key = _instance_key()
+        QtNetwork.QLocalServer.removeServer(key)  # stale socket after a crash
+        self._ipc = QtNetwork.QLocalServer(self)
+        if self._ipc.listen(key):
+            self._ipc.newConnection.connect(self._on_instance_knock)
+        else:
+            log.warning("Single-instance server: %s", self._ipc.errorString())
+
+    def _on_instance_knock(self):
+        while self._ipc.hasPendingConnections():
+            conn = self._ipc.nextPendingConnection()
+            conn.abort()  # the knock itself is the message
+            conn.deleteLater()
+        self.show_all()
+        self.tray.showMessage(
+            APP_NAME, "Deskfinity уже запущен — он здесь, в трее.",
+            QtWidgets.QSystemTrayIcon.MessageIcon.Information, 4000,
+        )
 
     # ------------------------------------------------------------- hotkey
     def _install_hotkey(self):
-        """Global Ctrl+Alt+F -> start drawing a new box."""
+        """Global Ctrl+Alt+F -> start drawing a new box. True on success."""
         self._hotkey_filter = None
         if not IS_WINDOWS:
-            return
+            return False
         MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
         VK_F = 0x46
         ok = user32.RegisterHotKey(
             None, 1, MOD_ALT | MOD_CONTROL | MOD_NOREPEAT, VK_F
         )
         if not ok:
-            return
+            log.warning(
+                "Ctrl+Alt+F is already taken by another program (error %d)",
+                ctypes.get_last_error(),
+            )
+            return False
 
         manager = self
 
@@ -1306,6 +2148,7 @@ class Manager(QtCore.QObject):
 
         self._hotkey_filter = _Filter()
         self.app.installNativeEventFilter(self._hotkey_filter)
+        return True
 
     # ---------------------------------------------------------------- tray
     def _tray_icon(self):
@@ -1328,13 +2171,18 @@ class Manager(QtCore.QObject):
         self.tray = QtWidgets.QSystemTrayIcon(self._tray_icon())
         self.tray.setToolTip(APP_NAME)
         m = QtWidgets.QMenu()
-        m.addAction("Новая группа (Ctrl+Alt+F)", self.begin_draw)
+        m.addAction(
+            "Новая группа (Ctrl+Alt+F)" if self.hotkey_ok else "Новая группа",
+            self.begin_draw,
+        )
         m.addSeparator()
         m.addAction("Показать все", self.show_all)
         m.addAction("Скрыть все", self.hide_all)
         m.addSeparator()
         m.addAction("Обновить иконки", self.refresh_icons)
         m.addAction("Открыть папку настроек", self.open_config_dir)
+        m.addAction("Разложить рабочий стол по правилам", lambda: self.sort_desktop())
+        m.addAction("Восстановить файлы из хранилища…", self.recover_storage)
         a = m.addAction("Запускать с Windows")
         a.setCheckable(True)
         a.setChecked(self._autostart_enabled())
@@ -1437,13 +2285,50 @@ class Manager(QtCore.QObject):
     def _write(self):
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            data = {"version": 1, "boxes": [f.to_dict() for f in self.boxes]}
+            boxes = [f.to_dict() for f in self.boxes] + self._unloaded
+            data = {"version": 1, "boxes": boxes}
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
             os.replace(tmp, CONFIG_PATH)
         except Exception:
-            traceback.print_exc()
+            log.exception("Could not save %s", CONFIG_PATH)
+
+    @staticmethod
+    def _read_entries(path):
+        """Box entries from a config file. Raises if the file is unusable."""
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        entries = data.get("boxes", data.get("fences", []))
+        if not isinstance(entries, list):
+            raise ValueError("'boxes' is not a list")
+        return entries
+
+    def _backup(self):
+        """Rotate boxes.json.bak1..N, skipping copies identical to the last."""
+        try:
+            newest = CONFIG_PATH + ".bak1"
+            if os.path.exists(newest):
+                with open(CONFIG_PATH, "rb") as a, open(newest, "rb") as b:
+                    if a.read() == b.read():
+                        return
+            for i in range(BACKUPS - 1, 0, -1):
+                older = f"{CONFIG_PATH}.bak{i}"
+                if os.path.exists(older):
+                    os.replace(older, f"{CONFIG_PATH}.bak{i + 1}")
+            shutil.copy2(CONFIG_PATH, newest)
+        except Exception:
+            log.exception("Could not back up %s", CONFIG_PATH)
+
+    def _quarantine(self, path):
+        """Keep a copy of an unreadable config before it can be overwritten."""
+        kept = f"{path}.broken-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copy2(path, kept)
+            log.error("Unreadable config saved as %s", kept)
+        except Exception:
+            log.exception("Could not keep a copy of %s", path)
+        return kept
 
     def load(self):
         path = CONFIG_PATH
@@ -1451,17 +2336,98 @@ class Manager(QtCore.QObject):
             path = self._legacy_config()
             if not path:
                 return
+        restored = False
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            for d in data.get("boxes", data.get("fences", [])):
-                f = Box(self, d)
-                self.boxes.append(f)
-                f.show()
-            if path != CONFIG_PATH and self.boxes:
-                self._write()  # migrate to the new location
+            entries = self._read_entries(path)
+            if path == CONFIG_PATH:
+                self._backup()
         except Exception:
-            traceback.print_exc()
+            log.exception("Could not load %s", path)
+            kept = os.path.basename(self._quarantine(path))
+            entries = None
+            for i in range(1, BACKUPS + 1):
+                bak = f"{CONFIG_PATH}.bak{i}"
+                try:
+                    entries = self._read_entries(bak)
+                except Exception:
+                    continue
+                log.warning("Restored the layout from %s", bak)
+                restored = True
+                self.load_notice = (
+                    f"Файл настроек повреждён (копия: {kept}). "
+                    f"Раскладка восстановлена из резервной копии "
+                    f"{os.path.basename(bak)}."
+                )
+                break
+            if entries is None:
+                self.load_notice = (
+                    f"Файл настроек повреждён и не прочитан (копия: {kept}). "
+                    "Файлы боксов целы — верни их через трей: "
+                    "«Восстановить файлы из хранилища»."
+                )
+                return
+
+        for d in entries:
+            try:
+                f = Box(self, d)
+            except Exception:
+                log.exception("Box failed to load, keeping it untouched: %r", d)
+                self._unloaded.append(d)
+                continue
+            self.boxes.append(f)
+            f.show()
+        if self._unloaded and not self.load_notice:
+            self.load_notice = (
+                f"Не удалось загрузить боксов: {len(self._unloaded)}. "
+                "Их данные сохранены в boxes.json без изменений, "
+                "подробности — в deskfinity.log."
+            )
+        if (path != CONFIG_PATH or restored) and self.boxes:
+            self._write()  # migrate to the new location / replace the broken file
+
+    def recover_storage(self):
+        """Bring back storage folders that no box owns any more."""
+        owned = {b.uid for b in self.boxes}
+        owned |= {d.get("uid") for d in self._unloaded if isinstance(d, dict)}
+        found = []
+        try:
+            names = sorted(os.listdir(STORE_DIR))
+        except OSError:
+            names = []
+        for uid in names:
+            folder = os.path.join(STORE_DIR, uid)
+            if uid in owned or not os.path.isdir(folder):
+                continue
+            items = [os.path.join(folder, n) for n in sorted(os.listdir(folder))]
+            if items:
+                found.append((uid, items))
+
+        if not found:
+            QtWidgets.QMessageBox.information(
+                None, APP_NAME, "В хранилище нет файлов без бокса."
+            )
+            return
+
+        avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
+        for k, (uid, items) in enumerate(found):
+            # reusing the folder name as uid makes the new box own those files
+            box = Box(self, {
+                "uid": uid,
+                "title": "Восстановлено",
+                "items": items,
+                "geometry": [
+                    avail.x() + 60 + 40 * k, avail.y() + 60 + 40 * k, 340, 280
+                ],
+            })
+            self.boxes.append(box)
+            box.show()
+            log.info("Recovered storage folder %s (%d items)", uid, len(items))
+        self.save()
+        QtWidgets.QMessageBox.information(
+            None, APP_NAME,
+            f"Восстановлено боксов: {len(found)}, "
+            f"файлов: {sum(len(i) for _, i in found)}.",
+        )
 
     @staticmethod
     def _legacy_config():
@@ -1503,14 +2469,35 @@ def main():
         except Exception:
             pass
 
+    setup_logging()
+    log.info("Starting %s", APP_NAME)
+
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
 
+    if another_instance_running():
+        log.info("Already running - not starting a second copy")
+        return
+
     ICONS = IconCache()
     mgr = Manager(app)
 
-    if not mgr.boxes:
+    if mgr.load_notice:
+        mgr.tray.showMessage(
+            APP_NAME, mgr.load_notice,
+            QtWidgets.QSystemTrayIcon.MessageIcon.Critical,
+            15000,
+        )
+    elif IS_WINDOWS and not mgr.hotkey_ok:
+        mgr.tray.showMessage(
+            APP_NAME,
+            "Сочетание Ctrl+Alt+F занято другой программой. "
+            "Новую группу можно создать кликом по иконке в трее.",
+            QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+            8000,
+        )
+    elif not mgr.boxes:
         mgr.tray.showMessage(
             APP_NAME,
             "Клик по иконке в трее — создать новую группу.",
