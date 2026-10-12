@@ -74,21 +74,18 @@ class Status(Base):
     def test_requests_coalesce_while_busy(self):
         m, b = self.manager([self.touch("Elsewhere", "x.txt")])
         self.wait_for(lambda: not m._status_busy)
-        started = []
-        real = df.threading.Thread
-        class Counting(real):
-            def start(self):
-                started.append(1)
-                super().start()
-        df.threading.Thread = Counting
-        try:
-            for _ in range(10):
-                m.request_status()
-            self.wait_for(lambda: not m._status_busy and not m._status_again)
-            self.spin(100)
-        finally:
-            df.threading.Thread = real
-        self.assertLessEqual(len(started), 2)
+        runs = []
+        real_check = m._check_status
+
+        def counting(paths):           # this manager's checks only
+            runs.append(1)
+            real_check(paths)
+        m._check_status = counting
+        for _ in range(10):
+            m.request_status()
+        self.wait_for(lambda: not m._status_busy and not m._status_again)
+        self.spin(100)
+        self.assertEqual(len(runs), 2)  # the first, plus one follow-up
 
 
 if __name__ == "__main__":

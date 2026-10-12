@@ -19,6 +19,40 @@ def load_json(path):
         return __import__("json").load(fh)
 
 
+# Every Manager a test creates is shut down in Base.tearDown, so no timer,
+# watcher or worker thread of one test can leak into the next.
+_MANAGERS = []
+_manager_init = df.Manager.__init__
+
+
+def _tracking_init(self, *args, **kwargs):
+    _MANAGERS.append(self)
+    _manager_init(self, *args, **kwargs)
+
+
+df.Manager.__init__ = _tracking_init
+
+
+def shutdown_managers():
+    while _MANAGERS:
+        m = _MANAGERS.pop()
+        for name in ("_status_timer", "_fit_timer", "_save_timer"):
+            t = getattr(m, name, None)
+            if t is not None:
+                t.stop()
+        sorter = getattr(m, "sorter", None)
+        if sorter is not None:
+            sorter._timer.stop()
+            if sorter._watcher.directories():
+                sorter._watcher.removePaths(sorter._watcher.directories())
+        if getattr(m, "_ipc", None) is not None:
+            m._ipc.close()
+        for b in m.boxes:
+            b.close()
+        if getattr(m, "tray", None) is not None:
+            m.tray.hide()
+
+
 class FakeManager:
     def __init__(self):
         self.saves = 0
@@ -54,6 +88,7 @@ class Base(unittest.TestCase):
                     staticmethod(lambda *a, **k: QtWidgets.QMessageBox.StandardButton.No))
 
     def tearDown(self):
+        shutdown_managers()
         df.desktop_dir = self._orig_desktop_dir
         for name, fn in self._mb.items():
             setattr(QtWidgets.QMessageBox, name, fn)
