@@ -39,9 +39,13 @@ pythonw deskfinity.py
 
 ## Moving vs. referencing
 
-By default a box **takes ownership** of what you drop into it: the file is moved
-into `%APPDATA%\Deskfinity\storage\<box-id>\`, so it disappears from the desktop
-on its own. No need to hide desktop icons.
+By default a box **takes ownership** of desktop items you drop into it: the file
+is moved into `%APPDATA%\Deskfinity\storage\<box-id>\`, so it disappears from the
+desktop on its own. No need to hide desktop icons.
+
+Only items lying directly on the Desktop (yours or the Public one) are moved.
+Anything dropped from another folder or drive stays where it is and the box just
+links to it — dragging in `D:\Projects` will not relocate your project.
 
 - **Move files into box** — toggle per box. Turn it off and the box only keeps
   references, leaving originals where they are.
@@ -149,9 +153,13 @@ pythonw deskfinity.py
 
 ## Перенос против ссылок
 
-По умолчанию бокс **забирает файл себе**: то, что ты в него бросаешь,
-переезжает в `%APPDATA%\Deskfinity\storage\<id бокса>\`, поэтому с рабочего
+По умолчанию бокс **забирает себе** элементы рабочего стола: то, что ты в него
+бросаешь, переезжает в `%APPDATA%\Deskfinity\storage\<id бокса>\`, поэтому со
 стола оно исчезает само. Скрывать значки не нужно.
+
+Переносится только то, что лежит прямо на рабочем столе (твоём или общем).
+Всё, что брошено из других папок и дисков, остаётся на месте — бокс просто
+хранит ссылку. Перетащив `D:\Projects`, ты не переселишь свой проект.
 
 - **Переносить файлы в бокс** — переключатель для каждого бокса отдельно. Сними
   галочку, и бокс будет хранить только ссылки, не трогая оригиналы.

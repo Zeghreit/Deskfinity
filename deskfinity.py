@@ -300,17 +300,39 @@ else:  # non-Windows fallback so the file at least imports elsewhere
 # --------------------------------------------------------------------------- #
 #  File relocation helpers
 # --------------------------------------------------------------------------- #
-def desktop_dir():
-    """Real filesystem path of the user's Desktop (locale-independent)."""
+def _shell_folder(csidl):
+    """Filesystem path of a CSIDL shell folder, or None."""
     if IS_WINDOWS:
         try:
             buf = ctypes.create_unicode_buffer(260)
-            # CSIDL_DESKTOPDIRECTORY = 0x0010, SHGFP_TYPE_CURRENT = 0
-            if shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf) == 0:
+            # SHGFP_TYPE_CURRENT = 0
+            if shell32.SHGetFolderPathW(None, csidl, None, 0, buf) == 0:
                 return buf.value
         except Exception:
             pass
-    return os.path.join(os.path.expanduser("~"), "Desktop")
+    return None
+
+
+def desktop_dir():
+    """Real filesystem path of the user's Desktop (locale-independent)."""
+    # CSIDL_DESKTOPDIRECTORY = 0x0010
+    return _shell_folder(0x0010) or os.path.join(os.path.expanduser("~"), "Desktop")
+
+
+def desktop_dirs():
+    """The user's and the shared (Public) Desktop folders, normalised."""
+    # CSIDL_COMMON_DESKTOPDIRECTORY = 0x0019
+    dirs = [desktop_dir(), _shell_folder(0x0019)]
+    return {os.path.normcase(os.path.abspath(d)) for d in dirs if d}
+
+
+def on_desktop(path):
+    """True if *path* sits directly on one of the Desktop folders."""
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        return os.path.normcase(parent) in desktop_dirs()
+    except Exception:
+        return False
 
 
 def unique_target(folder, name):
@@ -492,8 +514,17 @@ class Box(QtWidgets.QWidget):
             return False
 
     def _ingest(self, path):
-        """Physically move *path* into this box. Returns (new_path, pending)."""
-        if not self.move_files or not os.path.exists(path) or self._in_store(path):
+        """Physically move *path* into this box. Returns (new_path, pending).
+
+        Only items lying directly on the Desktop are moved; anything dropped
+        from another folder or drive stays where it is and is kept as a link.
+        """
+        if (
+            not self.move_files
+            or not os.path.exists(path)
+            or self._in_store(path)
+            or not on_desktop(path)
+        ):
             return path, None
         target = unique_target(self.store_dir(), os.path.basename(path))
         try:
@@ -1032,11 +1063,11 @@ class Box(QtWidgets.QWidget):
         m.addAction("Добавить файлы…", self.add_via_dialog)
         m.addSeparator()
 
-        a = m.addAction("Переносить файлы в бокс")
+        a = m.addAction("Переносить файлы со стола в бокс")
         a.setCheckable(True)
         a.setChecked(self.move_files)
         a.triggered.connect(self.toggle_move_files)
-        m.addAction("Перенести оригиналы в бокс", self.migrate_originals)
+        m.addAction("Перенести оригиналы со стола в бокс", self.migrate_originals)
         m.addAction("Открыть папку бокса", self.open_store)
         m.addSeparator()
 
