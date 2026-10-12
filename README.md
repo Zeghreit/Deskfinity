@@ -88,6 +88,8 @@ desktop, or leave them in storage.
   `WM_WINDOWPOSCHANGING` and forcing `HWND_BOTTOM`. They never appear in the
   taskbar (`Qt.Tool`).
 - Broken links are drawn dimmed.
+- Unplug a monitor and its boxes are parked on the main screen; plug it back
+  in and they return to their own spot (that spot is what stays saved).
 - Only one copy runs per user: launching it again just brings the boxes back
   and points at the tray icon.
 
@@ -214,6 +216,8 @@ pythonw deskfinity.py
 - Боксы держатся **под всеми окнами** через перехват `WM_WINDOWPOSCHANGING` с
   принудительным `HWND_BOTTOM`. В таскбаре не светятся (`Qt.Tool`).
 - Битые ссылки рисуются полупрозрачными.
+- Отключил монитор — его боксы переезжают на основной экран; подключил обратно —
+  возвращаются на своё место (в конфиге хранится именно оно).
 - Запускается только одна копия на пользователя: повторный запуск просто
   показывает боксы и подсказывает, что программа уже в трее.
 

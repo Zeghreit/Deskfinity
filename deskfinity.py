@@ -483,6 +483,28 @@ STATUS_INTERVAL_MS = 4000
 
 
 # --------------------------------------------------------------------------- #
+#  Screens
+# --------------------------------------------------------------------------- #
+def screen_areas():
+    """Available desktop areas of all monitors, the primary one first."""
+    primary = QtGui.QGuiApplication.primaryScreen()
+    screens = sorted(
+        QtGui.QGuiApplication.screens(), key=lambda s: s is not primary
+    )
+    return [s.availableGeometry() for s in screens]
+
+
+def header_visible(rect, areas):
+    """True if enough of the header strip of *rect* is on some screen."""
+    header = QRect(rect.x(), rect.y(), rect.width(), HEADER_H)
+    for a in areas:
+        r = header.intersected(a)
+        if r.width() >= 40 and r.height() >= HEADER_H // 2:
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
 #  A single box window
 # --------------------------------------------------------------------------- #
 class Box(QtWidgets.QWidget):
@@ -533,6 +555,7 @@ class Box(QtWidgets.QWidget):
         self._dragging_item = False
         self._scroll = 0
         self._drop_hint = False
+        self._home = None            # real spot while parked on a visible screen
 
         self._rects = []
         self._cols = 1
@@ -542,12 +565,13 @@ class Box(QtWidgets.QWidget):
     def to_dict(self):
         g = self.geometry()
         h = self._expanded_h if self.collapsed else g.height()
+        pos = self._home or g.topLeft()
         return {
             "uid": self.uid,
             "title": self.title,
             "move_files": self.move_files,
             "items": self.items,
-            "geometry": [g.x(), g.y(), g.width(), h],
+            "geometry": [pos.x(), pos.y(), g.width(), h],
             "color": [self.bg_color.red(), self.bg_color.green(), self.bg_color.blue()],
             "alpha": self.bg_alpha,
             "icon_size": self.icon_size,
@@ -954,6 +978,7 @@ class Box(QtWidgets.QWidget):
             self.items.insert(tgt, item)
             self.manager.save()
         elif self._mode in ("move", "resize"):
+            self._home = None  # the user picked a new spot
             self.manager.save()
         self._mode = None
         self._resize_dir = ""
@@ -1002,6 +1027,32 @@ class Box(QtWidgets.QWidget):
         else:
             self._expanded_h = g.height()
         self.setGeometry(g)
+
+    def fit_to_screens(self, areas):
+        """Keep the header reachable when monitors are added or removed.
+
+        A box that ends up off every screen is parked on the primary one; its
+        real spot stays in _home (and in the saved config) and it moves back
+        as soon as that spot is visible again.
+        """
+        if not areas:
+            return
+        if self._home is not None and header_visible(
+            QRect(self._home, self.size()), areas
+        ):
+            self.move(self._home)
+            self._home = None
+            return
+        if header_visible(self.geometry(), areas):
+            return
+        if self._home is None:
+            self._home = self.geometry().topLeft()
+        a = areas[0]
+        x = max(a.left(), min(self.x(), a.right() - self.width() + 1))
+        y = max(a.top(), min(self.y(), a.bottom() - self.height() + 1))
+        self.move(x, y)
+        log.info("Box %s parked on screen (was at %d,%d)",
+                 self.uid, self._home.x(), self._home.y())
 
     # ------------------------------------------------------------ drag&drop
     def dragEnterEvent(self, ev):
@@ -1441,12 +1492,37 @@ class Manager(QtCore.QObject):
         self._status_timer.setInterval(STATUS_INTERVAL_MS)
         self._status_timer.timeout.connect(self.request_status)
 
+        # monitors come and go: re-fit boxes once things settle
+        self._fit_timer = QtCore.QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(500)
+        self._fit_timer.timeout.connect(self.fit_boxes)
+        app.screenAdded.connect(self._on_screen_added)
+        app.screenRemoved.connect(lambda *_: self._fit_timer.start())
+        app.primaryScreenChanged.connect(lambda *_: self._fit_timer.start())
+        for scr in app.screens():
+            self._watch_screen(scr)
+
         self._listen_for_instances()
         self.hotkey_ok = self._install_hotkey()
         self._build_tray()
         self.load()
+        self.fit_boxes()
         self.request_status()
         self._status_timer.start()
+
+    # ------------------------------------------------------------- screens
+    def _watch_screen(self, scr):
+        scr.availableGeometryChanged.connect(lambda *_: self._fit_timer.start())
+
+    def _on_screen_added(self, scr):
+        self._watch_screen(scr)
+        self._fit_timer.start()
+
+    def fit_boxes(self):
+        areas = screen_areas()
+        for b in self.boxes:
+            b.fit_to_screens(areas)
 
     # --------------------------------------------------------- item status
     def request_status(self):
