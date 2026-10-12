@@ -26,12 +26,13 @@ import uuid
 import shutil
 import ctypes
 import time
+import getpass
 import logging
 import subprocess
 from ctypes import wintypes
 from logging.handlers import RotatingFileHandler
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtNetwork, QtWidgets
 from PyQt6.QtCore import Qt, QRect, QPoint, QSize
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -1331,6 +1332,60 @@ class DrawOverlay(QtWidgets.QWidget):
 
 
 # --------------------------------------------------------------------------- #
+#  Single instance
+# --------------------------------------------------------------------------- #
+_INSTANCE_MUTEX = None  # held for the lifetime of the process
+
+
+def _instance_key():
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "user"
+    return f"{APP_NAME}-{user}"
+
+
+def _claim_mutex():
+    """Windows: own a per-session named mutex. False if someone else does."""
+    global _INSTANCE_MUTEX
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR
+        ]
+        ctypes.set_last_error(0)
+        handle = kernel32.CreateMutexW(None, False, "Local\\" + _instance_key())
+        if not handle:
+            return True  # cannot tell - do not block startup
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _INSTANCE_MUTEX = handle
+    except Exception:
+        log.exception("Single-instance mutex failed")
+    return True
+
+
+def _ping_instance():
+    """Knock on a running instance's local server. True if it answered."""
+    sock = QtNetwork.QLocalSocket()
+    sock.connectToServer(_instance_key())
+    if not sock.waitForConnected(500):
+        return False
+    sock.disconnectFromServer()
+    return True
+
+
+def another_instance_running():
+    """True if Deskfinity already runs for this user (it is asked to show)."""
+    if IS_WINDOWS and not _claim_mutex():
+        _ping_instance()
+        return True
+    return _ping_instance()
+
+
+# --------------------------------------------------------------------------- #
 #  Manager / tray
 # --------------------------------------------------------------------------- #
 class Manager(QtCore.QObject):
@@ -1347,9 +1402,31 @@ class Manager(QtCore.QObject):
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self._write)
 
+        self._listen_for_instances()
         self.hotkey_ok = self._install_hotkey()
         self._build_tray()
         self.load()
+
+    # ----------------------------------------------------- single instance
+    def _listen_for_instances(self):
+        """Later launches knock here instead of starting a second copy."""
+        key = _instance_key()
+        QtNetwork.QLocalServer.removeServer(key)  # stale socket after a crash
+        self._ipc = QtNetwork.QLocalServer(self)
+        if self._ipc.listen(key):
+            self._ipc.newConnection.connect(self._on_instance_knock)
+        else:
+            log.warning("Single-instance server: %s", self._ipc.errorString())
+
+    def _on_instance_knock(self):
+        while self._ipc.hasPendingConnections():
+            conn = self._ipc.nextPendingConnection()
+            conn.disconnected.connect(conn.deleteLater)
+        self.show_all()
+        self.tray.showMessage(
+            APP_NAME, "Deskfinity уже запущен — он здесь, в трее.",
+            QtWidgets.QSystemTrayIcon.MessageIcon.Information, 4000,
+        )
 
     # ------------------------------------------------------------- hotkey
     def _install_hotkey(self):
@@ -1710,6 +1787,10 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
+
+    if another_instance_running():
+        log.info("Already running - not starting a second copy")
+        return
 
     ICONS = IconCache()
     mgr = Manager(app)
