@@ -1060,6 +1060,7 @@ class Box(QtWidgets.QWidget):
     def set_alpha(self, v):
         self.bg_alpha = int(v)
         self.update()
+        self.manager.save()  # debounced; also covers clicks and arrow keys
 
     def set_icon_size(self, v):
         self.icon_size = int(v)
@@ -1147,7 +1148,6 @@ class Box(QtWidgets.QWidget):
         slider.setValue(self.bg_alpha)
         slider.setFixedWidth(180)
         slider.valueChanged.connect(self.set_alpha)
-        slider.sliderReleased.connect(self.manager.save)
         wa.setDefaultWidget(slider)
         alpha_menu.addAction(wa)
 
