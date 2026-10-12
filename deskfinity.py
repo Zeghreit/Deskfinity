@@ -199,7 +199,7 @@ if IS_WINDOWS:
 
             raw = bytearray(buf.raw)
             # If the icon carries no alpha channel, rebuild it from the mask.
-            if not any(raw[3::4]):
+            if raw[3::4].count(0) == w * h:
                 mbmi = BITMAPINFO()
                 mbmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
                 mbmi.bmiHeader.biWidth = w
@@ -216,10 +216,7 @@ if IS_WINDOWS:
                     )
                 finally:
                     user32.ReleaseDC(None, hdc)
-                mraw = mbuf.raw
-                for i in range(w * h):
-                    # mask: white (0xFF) = transparent
-                    raw[i * 4 + 3] = 0 if mraw[i * 4] else 255
+                raw[3::4] = _alpha_from_mask(mbuf.raw)
 
             img = QtGui.QImage(
                 bytes(raw), w, h, QtGui.QImage.Format.Format_ARGB32
@@ -291,46 +288,52 @@ if IS_WINDOWS:
             pass
         return None
 
-    def _content_rect(img):
-        """Bounding box of non-transparent pixels (jumbo icons are padded)."""
-        w, h = img.width(), img.height()
-        try:
-            ptr = img.constBits()
-            ptr.setsize(img.sizeInBytes())
-            data = bytes(ptr)
-            bpl = img.bytesPerLine()
-        except Exception:
-            return QRect(0, 0, w, h)
-
-        left, top, right, bottom = w, h, -1, -1
-        step = 1 if w <= 64 else 2
-        for y in range(0, h, step):
-            base = y * bpl
-            row = data[base:base + w * 4]
-            alphas = row[3::4]
-            if not any(a > 8 for a in alphas):
-                continue
-            if y < top:
-                top = y
-            bottom = y
-            for x in range(0, w, step):
-                if alphas[x] > 8:
-                    if x < left:
-                        left = x
-                    if x > right:
-                        right = x
-        if right < 0:
-            return QRect(0, 0, w, h)
-        pad = step
-        left = max(0, left - pad)
-        top = max(0, top - pad)
-        right = min(w - 1, right + pad)
-        bottom = min(h - 1, bottom + pad)
-        return QRect(left, top, right - left + 1, bottom - top + 1)
-
 else:  # non-Windows fallback so the file at least imports elsewhere
     def shell_icon(path, want=256):
         return None
+
+
+# Per-pixel work goes through bytes.translate()/find(), which run in C -
+# a Python loop over a 256x256 jumbo icon costs tens of milliseconds.
+_VISIBLE = bytes(0 if a <= 8 else 1 for a in range(256))
+_MASK_TO_ALPHA = bytes([255] + [0] * 255)   # AND mask: 0 = opaque
+
+
+def _alpha_from_mask(mask_bgra):
+    """Alpha bytes rebuilt from a 32-bit icon AND mask (white = clear)."""
+    return mask_bgra[0::4].translate(_MASK_TO_ALPHA)
+
+
+def _content_rect(img):
+    """Bounding box of non-transparent pixels (jumbo icons are padded)."""
+    w, h = img.width(), img.height()
+    try:
+        ptr = img.constBits()
+        ptr.setsize(img.sizeInBytes())
+        data = bytes(ptr)
+        bpl = img.bytesPerLine()
+    except Exception:
+        return QRect(0, 0, w, h)
+
+    left, top, right, bottom = w, -1, -1, -1
+    for y in range(h):
+        base = y * bpl
+        row = data[base + 3:base + w * 4:4].translate(_VISIBLE)
+        first = row.find(1)
+        if first < 0:
+            continue
+        if top < 0:
+            top = y
+        bottom = y
+        left = min(left, first)
+        right = max(right, row.rfind(1))
+    if right < 0:
+        return QRect(0, 0, w, h)
+    left = max(0, left - 1)
+    top = max(0, top - 1)
+    right = min(w - 1, right + 1)
+    bottom = min(h - 1, bottom + 1)
+    return QRect(left, top, right - left + 1, bottom - top + 1)
 
 
 # --------------------------------------------------------------------------- #
