@@ -25,6 +25,7 @@ import json
 import uuid
 import shutil
 import ctypes
+import time
 import logging
 import subprocess
 from ctypes import wintypes
@@ -49,6 +50,7 @@ log = logging.getLogger(APP_NAME)
 HEADER_H = 26
 EDGE = 7          # resize hit zone
 MIN_W, MIN_H = 160, 110
+BACKUPS = 3       # boxes.json.bak1 .. bak3, taken at startup
 
 
 # --------------------------------------------------------------------------- #
@@ -1336,6 +1338,8 @@ class Manager(QtCore.QObject):
         super().__init__()
         self.app = app
         self.boxes = []
+        self._unloaded = []       # raw entries that failed to load - kept as is
+        self.load_notice = None   # set when the config needed rescuing
         self._overlay = None
         self._save_timer = QtCore.QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -1414,6 +1418,7 @@ class Manager(QtCore.QObject):
         m.addSeparator()
         m.addAction("Обновить иконки", self.refresh_icons)
         m.addAction("Открыть папку настроек", self.open_config_dir)
+        m.addAction("Восстановить файлы из хранилища…", self.recover_storage)
         a = m.addAction("Запускать с Windows")
         a.setCheckable(True)
         a.setChecked(self._autostart_enabled())
@@ -1516,13 +1521,50 @@ class Manager(QtCore.QObject):
     def _write(self):
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            data = {"version": 1, "boxes": [f.to_dict() for f in self.boxes]}
+            boxes = [f.to_dict() for f in self.boxes] + self._unloaded
+            data = {"version": 1, "boxes": boxes}
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
             os.replace(tmp, CONFIG_PATH)
         except Exception:
             log.exception("Could not save %s", CONFIG_PATH)
+
+    @staticmethod
+    def _read_entries(path):
+        """Box entries from a config file. Raises if the file is unusable."""
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        entries = data.get("boxes", data.get("fences", []))
+        if not isinstance(entries, list):
+            raise ValueError("'boxes' is not a list")
+        return entries
+
+    def _backup(self):
+        """Rotate boxes.json.bak1..N, skipping copies identical to the last."""
+        try:
+            newest = CONFIG_PATH + ".bak1"
+            if os.path.exists(newest):
+                with open(CONFIG_PATH, "rb") as a, open(newest, "rb") as b:
+                    if a.read() == b.read():
+                        return
+            for i in range(BACKUPS - 1, 0, -1):
+                older = f"{CONFIG_PATH}.bak{i}"
+                if os.path.exists(older):
+                    os.replace(older, f"{CONFIG_PATH}.bak{i + 1}")
+            shutil.copy2(CONFIG_PATH, newest)
+        except Exception:
+            log.exception("Could not back up %s", CONFIG_PATH)
+
+    def _quarantine(self, path):
+        """Keep a copy of an unreadable config before it can be overwritten."""
+        kept = f"{path}.broken-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copy2(path, kept)
+            log.error("Unreadable config saved as %s", kept)
+        except Exception:
+            log.exception("Could not keep a copy of %s", path)
+        return kept
 
     def load(self):
         path = CONFIG_PATH
@@ -1531,16 +1573,95 @@ class Manager(QtCore.QObject):
             if not path:
                 return
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            for d in data.get("boxes", data.get("fences", [])):
-                f = Box(self, d)
-                self.boxes.append(f)
-                f.show()
-            if path != CONFIG_PATH and self.boxes:
-                self._write()  # migrate to the new location
+            entries = self._read_entries(path)
+            if path == CONFIG_PATH:
+                self._backup()
         except Exception:
             log.exception("Could not load %s", path)
+            kept = os.path.basename(self._quarantine(path))
+            entries = None
+            for i in range(1, BACKUPS + 1):
+                bak = f"{CONFIG_PATH}.bak{i}"
+                try:
+                    entries = self._read_entries(bak)
+                except Exception:
+                    continue
+                log.warning("Restored the layout from %s", bak)
+                self.load_notice = (
+                    f"Файл настроек повреждён (копия: {kept}). "
+                    f"Раскладка восстановлена из резервной копии "
+                    f"{os.path.basename(bak)}."
+                )
+                break
+            if entries is None:
+                self.load_notice = (
+                    f"Файл настроек повреждён и не прочитан (копия: {kept}). "
+                    "Файлы боксов целы — верни их через трей: "
+                    "«Восстановить файлы из хранилища»."
+                )
+                return
+
+        for d in entries:
+            try:
+                f = Box(self, d)
+            except Exception:
+                log.exception("Box failed to load, keeping it untouched: %r", d)
+                self._unloaded.append(d)
+                continue
+            self.boxes.append(f)
+            f.show()
+        if self._unloaded and not self.load_notice:
+            self.load_notice = (
+                f"Не удалось загрузить боксов: {len(self._unloaded)}. "
+                "Их данные сохранены в boxes.json без изменений, "
+                "подробности — в deskfinity.log."
+            )
+        if path != CONFIG_PATH and self.boxes:
+            self._write()  # migrate to the new location
+
+    def recover_storage(self):
+        """Bring back storage folders that no box owns any more."""
+        owned = {b.uid for b in self.boxes}
+        owned |= {d.get("uid") for d in self._unloaded if isinstance(d, dict)}
+        found = []
+        try:
+            names = sorted(os.listdir(STORE_DIR))
+        except OSError:
+            names = []
+        for uid in names:
+            folder = os.path.join(STORE_DIR, uid)
+            if uid in owned or not os.path.isdir(folder):
+                continue
+            items = [os.path.join(folder, n) for n in sorted(os.listdir(folder))]
+            if items:
+                found.append((uid, items))
+
+        if not found:
+            QtWidgets.QMessageBox.information(
+                None, APP_NAME, "В хранилище нет файлов без бокса."
+            )
+            return
+
+        avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
+        for k, (uid, items) in enumerate(found):
+            # reusing the folder name as uid makes the new box own those files
+            box = Box(self, {
+                "uid": uid,
+                "title": "Восстановлено",
+                "items": items,
+                "geometry": [
+                    avail.x() + 60 + 40 * k, avail.y() + 60 + 40 * k, 340, 280
+                ],
+            })
+            self.boxes.append(box)
+            box.show()
+            log.info("Recovered storage folder %s (%d items)", uid, len(items))
+        self.save()
+        QtWidgets.QMessageBox.information(
+            None, APP_NAME,
+            f"Восстановлено боксов: {len(found)}, "
+            f"файлов: {sum(len(i) for _, i in found)}.",
+        )
 
     @staticmethod
     def _legacy_config():
@@ -1592,7 +1713,13 @@ def main():
     ICONS = IconCache()
     mgr = Manager(app)
 
-    if IS_WINDOWS and not mgr.hotkey_ok:
+    if mgr.load_notice:
+        mgr.tray.showMessage(
+            APP_NAME, mgr.load_notice,
+            QtWidgets.QSystemTrayIcon.MessageIcon.Critical,
+            15000,
+        )
+    elif IS_WINDOWS and not mgr.hotkey_ok:
         mgr.tray.showMessage(
             APP_NAME,
             "Сочетание Ctrl+Alt+F занято другой программой. "

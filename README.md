@@ -95,6 +95,15 @@ Config: `%APPDATA%\Deskfinity\boxes.json` — plain JSON, safe to edit by hand.
 Files owned by boxes live in `%APPDATA%\Deskfinity\storage\`. The tray menu has
 an "open settings folder" entry.
 
+Safety net:
+
+- On every start the config is copied to `boxes.json.bak1` (up to `bak3`).
+- If `boxes.json` is damaged, it is kept as `boxes.json.broken-<date>` and the
+  layout is restored from the newest readable backup. A box that fails to load
+  is kept in the file untouched instead of being dropped.
+- **Tray → Recover files from storage** turns any storage folder no box owns
+  (e.g. after "leave in storage" on delete) back into a box.
+
 Log: `%APPDATA%\Deskfinity\deskfinity.log` — errors, plus every file the app
 moves (from where to where), so nothing gets lost without a trace.
 
@@ -209,6 +218,16 @@ pythonw deskfinity.py
 Конфиг: `%APPDATA%\Deskfinity\boxes.json` — обычный JSON, можно править руками.
 Файлы боксов лежат в `%APPDATA%\Deskfinity\storage\`. В трее есть пункт
 «Открыть папку настроек».
+
+Страховка:
+
+- При каждом запуске конфиг копируется в `boxes.json.bak1` (до `bak3`).
+- Если `boxes.json` повреждён, он сохраняется как `boxes.json.broken-<дата>`, а
+  раскладка восстанавливается из свежей читаемой копии. Бокс, который не
+  загрузился, остаётся в файле нетронутым, а не теряется.
+- **Трей → Восстановить файлы из хранилища** превращает папки хранилища, которые
+  не принадлежат ни одному боксу (например, после «оставить в хранилище» при
+  удалении), обратно в бокс.
 
 Журнал: `%APPDATA%\Deskfinity\deskfinity.log` — ошибки и каждый перенос файла
 (откуда и куда), чтобы ничего не терялось бесследно.
