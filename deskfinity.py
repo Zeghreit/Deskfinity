@@ -846,10 +846,11 @@ class Box(QtWidgets.QWidget):
         if self.locked:
             return ""
         d = ""
-        if pos.y() <= EDGE:
-            d += "t"
-        elif pos.y() >= self.height() - EDGE:
-            d += "b"
+        if not self.collapsed:  # a collapsed box is all header: width only
+            if pos.y() <= EDGE:
+                d += "t"
+            elif pos.y() >= self.height() - EDGE:
+                d += "b"
         if pos.x() <= EDGE:
             d += "l"
         elif pos.x() >= self.width() - EDGE:
@@ -956,20 +957,20 @@ class Box(QtWidgets.QWidget):
     def _do_resize(self, gpos):
         delta = gpos - self._press_pos
         g = QRect(self._press_geo)
+        # clamp the dragged edge so the opposite one never moves
         if "l" in self._resize_dir:
-            g.setLeft(g.left() + delta.x())
+            g.setLeft(min(g.left() + delta.x(), g.right() - MIN_W + 1))
         if "r" in self._resize_dir:
-            g.setRight(g.right() + delta.x())
+            g.setRight(max(g.right() + delta.x(), g.left() + MIN_W - 1))
         if "t" in self._resize_dir:
-            g.setTop(g.top() + delta.y())
+            g.setTop(min(g.top() + delta.y(), g.bottom() - MIN_H + 1))
         if "b" in self._resize_dir:
-            g.setBottom(g.bottom() + delta.y())
-        if g.width() < MIN_W:
-            g.setWidth(MIN_W)
-        if g.height() < MIN_H:
-            g.setHeight(MIN_H)
+            g.setBottom(max(g.bottom() + delta.y(), g.top() + MIN_H - 1))
+        if self.collapsed:
+            g.setHeight(HEADER_H)
+        else:
+            self._expanded_h = g.height()
         self.setGeometry(g)
-        self._expanded_h = g.height()
 
     # ------------------------------------------------------------ drag&drop
     def dragEnterEvent(self, ev):
