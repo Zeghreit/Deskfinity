@@ -66,3 +66,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Deskfinity.exe
+      - name: Publish rolling dev build
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: Dev build (latest push)
+          prerelease: true
+          body: "Latest build from `${{ github.ref_name }}` @ ${{ github.sha }}. Update with update-deskfinity.cmd."
+          files: dist/Deskfinity.exe

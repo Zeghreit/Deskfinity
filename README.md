@@ -20,6 +20,12 @@ needed. Every push also builds one, under
 *Artifacts*. To keep the data next to the exe, create a `DeskfinityData`
 folder beside it (see *Portable mode* below).
 
+**Always the newest build:** put `tools/update-deskfinity.cmd` and
+`tools/update-deskfinity.ps1` next to `Deskfinity.exe` and double-click the
+`.cmd`. It downloads the latest build (the `dev` pre-release, refreshed on every
+push), stops the copy running from that folder, swaps the exe (the old one is
+kept as `Deskfinity.exe.old`) and starts it again.
+
 **From source:**
 
 1. Put `deskfinity.py` and `Deskfinity.bat` in the same folder.
@@ -206,6 +212,12 @@ MIT — see [LICENSE](LICENSE).
 Каждый push тоже собирает exe: [Actions](https://github.com/Zeghreit/Deskfinity/actions)
 → нужный запуск → *Artifacts*. Чтобы данные лежали рядом с exe, создай рядом
 папку `DeskfinityData` (см. *Портативный режим* ниже).
+
+**Всегда свежая сборка:** положи `tools/update-deskfinity.cmd` и
+`tools/update-deskfinity.ps1` рядом с `Deskfinity.exe` и запусти `.cmd`. Он
+скачает последнюю сборку (пре-релиз `dev`, обновляется при каждом push),
+остановит копию, запущенную из этой папки, подменит exe (старый останется как
+`Deskfinity.exe.old`) и запустит заново.
 
 **Из исходников:**
 
